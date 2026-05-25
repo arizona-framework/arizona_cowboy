@@ -1,0 +1,201 @@
+---
+# Erlang CI/CD workflow
+#
+# Job dependency structure:
+# - cache-erlang: Standalone, caches Erlang build artifacts
+# - check/test/artifacts: Depend on cache-erlang only
+name: Erlang
+
+"on":
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+  workflow_dispatch: {}
+  merge_group:
+
+concurrency:
+  group: ${{github.workflow}}-${{github.ref}}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cache-erlang:
+    name: Cache Erlang
+
+    runs-on: ubuntu-24.04
+
+    outputs:
+      build-cache-key: ${{ steps.set-build-key.outputs.key }}
+      build-cache-prefix: ${{ steps.set-build-key.outputs.prefix }}
+      rebar-cache-key: ${{ steps.set-rebar-key.outputs.key }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24
+        id: setup-beam
+        with:
+          version-type: strict
+          version-file: .tool-versions
+
+      - name: Set build cache key
+        id: set-build-key
+        run: |
+          os="${{ runner.os }}"
+          otp="${{ steps.setup-beam.outputs.otp-version }}"
+          cfg_hash="${{ hashFiles('rebar.config') }}"
+          lock_hash="${{ hashFiles('rebar.lock') }}"
+          prefix="_build-${os}-otp-${otp}-cfg-${cfg_hash}-"
+          echo "prefix=${prefix}" >> "${GITHUB_OUTPUT}"
+          echo "key=${prefix}lock-${lock_hash}" >> "${GITHUB_OUTPUT}"
+
+      - name: Set rebar cache key
+        id: set-rebar-key
+        run: |
+          echo "key=\
+          rebar3-\
+          ${{ runner.os }}-\
+          otp-${{ steps.setup-beam.outputs.otp-version }}-\
+          rebar3-${{ steps.setup-beam.outputs.rebar3-version }}-\
+          config-${{ hashFiles('rebar.config') }}" \
+          >> "${GITHUB_OUTPUT}"
+
+      - name: Cache _build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: _build
+          key: ${{ steps.set-build-key.outputs.key }}
+          restore-keys: ${{ steps.set-build-key.outputs.prefix }}
+
+      - name: Cache rebar3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ steps.set-rebar-key.outputs.key }}
+          restore-keys: |
+            rebar3-${{ runner.os }}-otp-${{ steps.setup-beam.outputs.otp-version }}-
+            rebar3-${{ runner.os }}-
+
+      - name: Compile
+        run: make compile-test
+
+  check:
+    name: Check
+
+    needs: cache-erlang
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24
+        id: setup-beam
+        with:
+          version-type: strict
+          version-file: .tool-versions
+
+      - name: Restore _build cache
+        id: restore-build-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: _build
+          key: ${{ needs.cache-erlang.outputs.build-cache-key }}
+          restore-keys: ${{ needs.cache-erlang.outputs.build-cache-prefix }}
+
+      - name: Restore rebar3 cache
+        id: restore-rebar3-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ needs.cache-erlang.outputs.rebar-cache-key }}
+          restore-keys: |
+            rebar3-${{ runner.os }}-otp-${{ steps.setup-beam.outputs.otp-version }}-
+            rebar3-${{ runner.os }}-
+
+      - name: Check code
+        run: make check-erl
+
+  test:
+    name: Test
+
+    needs: cache-erlang
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24
+        id: setup-beam
+        with:
+          version-type: strict
+          version-file: .tool-versions
+
+      - name: Restore _build cache
+        id: restore-build-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: _build
+          key: ${{ needs.cache-erlang.outputs.build-cache-key }}
+          restore-keys: ${{ needs.cache-erlang.outputs.build-cache-prefix }}
+
+      - name: Restore rebar3 cache
+        id: restore-rebar3-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ needs.cache-erlang.outputs.rebar-cache-key }}
+          restore-keys: |
+            rebar3-${{ runner.os }}-otp-${{ steps.setup-beam.outputs.otp-version }}-
+            rebar3-${{ runner.os }}-
+
+      - name: Test
+        run: make test-erl
+
+      - name: Coverage
+        run: make cover-erl
+
+  artifacts:
+    name: Verify artifacts
+
+    needs: cache-erlang
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24
+        id: setup-beam
+        with:
+          version-type: strict
+          version-file: .tool-versions
+
+      - name: Restore _build cache
+        id: restore-build-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: _build
+          key: ${{ needs.cache-erlang.outputs.build-cache-key }}
+          restore-keys: ${{ needs.cache-erlang.outputs.build-cache-prefix }}
+
+      - name: Restore rebar3 cache
+        id: restore-rebar3-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/rebar3
+          key: ${{ needs.cache-erlang.outputs.rebar-cache-key }}
+          restore-keys: |
+            rebar3-${{ runner.os }}-otp-${{ steps.setup-beam.outputs.otp-version }}-
+            rebar3-${{ runner.os }}-
+
+      - name: Check if build left artifacts
+        run: |
+          rebar3 compile
+          git diff --exit-code

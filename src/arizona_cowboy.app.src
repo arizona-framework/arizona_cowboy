@@ -1,0 +1,20 @@
+{application, arizona_cowboy, [
+    {description, "Cowboy HTTP/WS adapter for Arizona"},
+    {vsn, semver},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        arizona,
+        cowboy
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [
+        {"GitHub", "https://github.com/arizona-framework/arizona_cowboy"},
+        {"Docs", "https://hexdocs.pm/arizona_cowboy"},
+        {"Issues", "https://github.com/arizona-framework/arizona_cowboy/issues"},
+        {"Arizona", "https://github.com/arizona-framework/arizona"}
+    ]}
+]}.
