@@ -7,7 +7,7 @@ SHELL := /bin/bash
 .PHONY: all ci precommit compile compile-test \
 	fmt \
 	check check-dirty check-fast check-erl check-fmt check-lint check-hank check-xref check-dialyzer \
-	test test-eunit test-ct test-erl \
+	test test-eunit test-ct test-erl test-conformance \
 	cover cover-erl \
 	doc doc-erl \
 	clean
@@ -19,7 +19,7 @@ ci:
 	$(MAKE) check-dirty
 	$(MAKE) check-erl
 	$(MAKE) test-erl
-	$(MAKE) cover-erl
+	$(MAKE) test-conformance
 	$(MAKE) doc-erl
 
 check-dirty:
@@ -62,7 +62,7 @@ check-hank:
 		(! grep -q "no longer needed")
 
 check-xref:
-	rebar3 xref
+	rebar3 as test xref
 
 check-dialyzer:
 	rebar3 as test dialyzer
@@ -78,6 +78,23 @@ test-ct:
 test-erl:
 	rebar3 as test test
 
+# Arizona's conformance suite, run against this checkout: arizona's test profile
+# depends on this package, and a `_checkouts` link swaps in the local tree. The
+# smoke suite above only boots a listener; this is what verifies the adapter.
+ARIZONA_REPO ?= https://github.com/arizona-framework/arizona.git
+ARIZONA_REF ?= refactor/extract-adapters
+ARIZONA_DIR ?= $(CURDIR)/../.arizona_cowboy-conformance
+
+test-conformance:
+	rm -rf $(ARIZONA_DIR)
+	git clone --quiet --depth 1 --branch $(ARIZONA_REF) $(ARIZONA_REPO) $(ARIZONA_DIR)
+	mkdir -p $(ARIZONA_DIR)/_checkouts
+	ln -s $(CURDIR) $(ARIZONA_DIR)/_checkouts/arizona_cowboy
+	cd $(ARIZONA_DIR) && ARIZONA_CONFORMANCE_DRIVER=arizona_conformance_cowboy \
+		rebar3 as test ct --suite=arizona_server_conformance_SUITE
+
+# The smoke suite alone covers little of the adapter; arizona's suites exercise
+# it, so this is informational, not a gate.
 cover: cover-erl
 
 cover-erl:

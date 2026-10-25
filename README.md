@@ -1,32 +1,32 @@
 # arizona_cowboy
 
-Cowboy HTTP/WebSocket adapter for the [Arizona](https://github.com/arizona-framework/arizona)
-real-time web framework.
+Cowboy HTTP/WebSocket server adapter for the
+[Arizona](https://github.com/arizona-framework/arizona) real-time web framework.
 
-Implements the `arizona_req` behaviour against Cowboy and ships a listener boot
-helper plus the matching router/HTTP/WS/static/reload handlers.
-
-This is the **alternate** adapter -- use it when you need OTP 28 compatibility.
-The default and recommended adapter is
-[`arizona_roadrunner`](https://github.com/arizona-framework/arizona_roadrunner)
-(requires OTP 29+).
+It implements Arizona's `arizona_server` and `arizona_req` behaviours on
+[Cowboy](https://github.com/ninenines/cowboy). The contract it meets, and the conformance
+suite that verifies it, are described in Arizona's
+[adapter guide](https://github.com/arizona-framework/arizona/blob/main/docs/adapters.md).
 
 ## Requirements
 
-- Erlang/OTP 28 or newer
-- [Arizona](https://github.com/arizona-framework/arizona) `~> 0.1`
-- [Cowboy](https://github.com/ninenines/cowboy) `~> 2.14`
+- Erlang/OTP 29 or newer
+- [Arizona](https://github.com/arizona-framework/arizona)
 
 ## Installation
 
+Depend on both Arizona and the adapter: the adapter does not pull Arizona in
+itself (Arizona's own test suites depend on it, and a dependency back would be
+a cycle).
+
 ```erlang
 {deps, [
-    {arizona, "~> 0.1"},
-    {arizona_cowboy, "~> 0.1"}
+    arizona,
+    arizona_cowboy
 ]}.
 ```
 
-Add to your `.app.src` `applications` list:
+and list both in your application's `applications`:
 
 ```erlang
 {applications, [kernel, stdlib, arizona, arizona_cowboy]}.
@@ -34,14 +34,12 @@ Add to your `.app.src` `applications` list:
 
 ## Configuration
 
-Tell Arizona to boot Cowboy by setting `adapter => arizona_cowboy_server` in
-the `arizona` server env:
+Name the adapter in the `arizona` server env; Arizona has no default:
 
 ```erlang
 [{arizona, [
     {server, #{
         adapter => arizona_cowboy_server,
-        scheme => http,
         transport_opts => [{port, 4040}],
         routes => [
             {live, ~"/", my_page, #{layouts => [{my_layout, render}]}},
@@ -52,21 +50,30 @@ the `arizona` server env:
 ]}].
 ```
 
-`arizona_cowboy_server:start/2` calls `application:ensure_all_started(cowboy)`
-itself, so cowboy doesn't need to be listed before `arizona` in your
-`applications`.
+A TLS listener (`scheme => https` with a `tls` list) negotiates HTTP/2 or
+HTTP/1.1 by ALPN, and a live session may open its WebSocket over HTTP/2.
+Cowboy's own protocol options go in `proto_opts`; see
+`arizona_cowboy_server` for the rest.
 
 ## Modules
 
-| Module                    | Purpose                                                          |
-| ------------------------- | ---------------------------------------------------------------- |
-| `arizona_cowboy_server`   | Listener boot — compiles routes, starts clear/TLS Cowboy         |
-| `arizona_cowboy_router`   | Translates Arizona routes into a Cowboy dispatch table           |
-| `arizona_cowboy_http`     | HTTP handler — delegates to `arizona_http:render/3`              |
-| `arizona_cowboy_ws`       | WebSocket handler — delegates to `arizona_ws:prepare/3`          |
-| `arizona_cowboy_static`   | Static file handler (directory + priv_dir)                       |
-| `arizona_cowboy_req`      | `arizona_req` adapter for Cowboy requests                        |
-| `arizona_cowboy_reload`   | Dev SSE endpoint streaming `arizona_reloader` events             |
+| Module | Purpose |
+| ------ | ------- |
+| `arizona_cowboy_server` | The `arizona_server` adapter: boots, drains and stops listeners |
+| `arizona_cowboy_handler` | The listener's one handler: routes with `arizona_route_table` |
+| `arizona_cowboy_req` | The `arizona_req` adapter |
+
+## Development
+
+```bash
+make precommit         # fmt, compile, checks, tests
+make test-conformance  # Arizona's conformance suite against this checkout
+make ci                # everything CI runs
+```
+
+`make test-conformance` clones Arizona (`ARIZONA_REF`, default its `main`)
+and runs its conformance suite with this checkout linked in through
+`_checkouts`.
 
 ## Contributing
 
