@@ -82,7 +82,7 @@ test-erl:
 # depends on this package, and a `_checkouts` link swaps in the local tree. The
 # smoke suite above only boots a listener; this is what verifies the adapter.
 ARIZONA_REPO ?= https://github.com/arizona-framework/arizona.git
-ARIZONA_REF ?= refactor/extract-adapters
+ARIZONA_REF ?= main
 ARIZONA_DIR ?= $(CURDIR)/../.arizona_cowboy-conformance
 
 test-conformance:
