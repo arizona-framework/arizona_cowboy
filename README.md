@@ -55,6 +55,22 @@ HTTP/1.1 by ALPN, and a live session may open its WebSocket over HTTP/2.
 Cowboy's own protocol options go in `proto_opts`; see
 `arizona_cowboy_server` for the rest.
 
+## On a listener another framework owns
+
+`arizona_cowboy_server:mount/2` serves Arizona routes on a Cowboy listener something else
+started (a Nova or plain Cowboy app): put `arizona_cowboy_middleware` before the owner's router
+in the listener's middlewares, and mount the routes under the listener's ref. Requests an
+Arizona route matches are served exactly as on a listener this adapter started; everything else
+continues down the owner's chain.
+
+```erlang
+{ok, _} = cowboy:start_clear(my_listener, [{port, 8080}], #{
+    middlewares => [arizona_cowboy_middleware, cowboy_router, cowboy_handler],
+    env => #{dispatch => MyDispatch}
+}),
+ok = arizona_cowboy_server:mount(my_listener, #{routes => ArizonaRoutes}).
+```
+
 ## Modules
 
 | Module | Purpose |
@@ -62,6 +78,7 @@ Cowboy's own protocol options go in `proto_opts`; see
 | `arizona_cowboy_server` | The `arizona_server` adapter: boots, drains and stops listeners |
 | `arizona_cowboy_handler` | The listener's one handler: routes with `arizona_route_table` |
 | `arizona_cowboy_req` | The `arizona_req` adapter |
+| `arizona_cowboy_middleware` | Serves mounted Arizona routes on a listener another framework owns |
 
 ## Development
 
