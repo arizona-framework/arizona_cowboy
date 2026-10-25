@@ -8,6 +8,18 @@ Arizona routes are compiled by `arizona_route_table` into a table kept per
 listener in a `persistent_term`, which the handler and
 `arizona_cowboy_req:resolve_route/3` read.
 
+## Mounting on a listener another framework owns
+
+`mount/2` serves Arizona routes on a Cowboy listener that something else
+started (a Nova or plain Cowboy application): it compiles the routes under that
+listener's ref without starting anything, and `arizona_cowboy_middleware`, placed
+in the listener's middleware chain, serves the requests they match and passes the
+rest on. It takes `routes`, `compress`, `error_page`, `ws_opts` and
+`max_content_length` as below; the owner configures the listener itself, TLS
+and `enable_connect_protocol` included. `unmount/1` forgets the routes,
+`notify_drain/2` tells the live sessions to wind down, and `drain/2` also waits
+for the requests in flight, then unmounts, leaving the owner's listener running.
+
 ## Options
 
 - `routes` -- the Arizona route list (required).
@@ -40,6 +52,9 @@ listener in a `persistent_term`, which the handler and
 
 -export([start/2]).
 -export([stop/1]).
+-export([mount/2]).
+-export([unmount/1]).
+-export([find_table/1]).
 -export([drain/2]).
 -export([notify_drain/2]).
 -export([recompile_routes/0]).
@@ -70,6 +85,36 @@ listener in a `persistent_term`, which the handler and
 %% API Functions
 %% --------------------------------------------------------------------
 
+-doc """
+Serves the Arizona `routes` in `Opts` on the Cowboy listener `Ref` someone else
+started, through `arizona_cowboy_middleware` in its middleware chain. Refused
+when `Ref` already serves Arizona routes.
+""".
+-spec mount(Ref, Opts) -> ok | {error, {already_started, Ref}} when
+    Ref :: atom(),
+    Opts :: map().
+mount(Ref, Opts0) ->
+    case persistent_term:get(?KEY(Ref), undefined) of
+        undefined ->
+            #{routes := Routes} = Opts = arizona_config:resolve(Opts0),
+            persistent_term:put(?KEY(Ref), (stash(Routes, Opts))#{owner => other}),
+            arizona_server_registry:listener_up(?MODULE, Ref, Routes);
+        _Serving ->
+            {error, {already_started, Ref}}
+    end.
+
+-doc "Stops serving Arizona routes on the listener `Ref`, which stays up.".
+-spec unmount(Ref) -> ok | {error, not_found} when
+    Ref :: atom().
+unmount(Ref) ->
+    case persistent_term:get(?KEY(Ref), undefined) of
+        #{owner := other} ->
+            true = persistent_term:erase(?KEY(Ref)),
+            arizona_server_registry:listener_down(Ref);
+        _NotMounted ->
+            {error, not_found}
+    end.
+
 -doc "Starts the Cowboy listener `Name` serving the Arizona `routes` in `Opts`.".
 -spec start(Name, Opts) -> {ok, pid()} | {error, term()} when
     Name :: atom(),
@@ -88,11 +133,10 @@ start(Name, Opts0) ->
 -spec stop(Name) -> ok | {error, not_found} when
     Name :: atom().
 stop(Name) ->
-    %% The listener goes first: a request still in flight reads the table.
-    Result = cowboy:stop_listener(Name),
-    persistent_term:erase(?KEY(Name)),
-    ok = arizona_server_registry:listener_down(Name),
-    Result.
+    case persistent_term:get(?KEY(Name), undefined) of
+        #{owner := other} -> unmount(Name);
+        _Owned -> stop_listener(Name)
+    end.
 
 -doc """
 Drains the listener `Name`: stops accepting connections, tells every live
@@ -108,8 +152,10 @@ drain(Name, Timeout) ->
     case persistent_term:get(?KEY(Name), undefined) of
         undefined ->
             {error, not_found};
-        _Stash ->
-            ok = ranch:suspend_listener(Name),
+        Stash ->
+            %% A mounted listener is its owner's to close; only the Arizona
+            %% sessions and requests on it are wound down.
+            ok = suspend_owned(Stash, Name),
             Deadline = erlang:monotonic_time(millisecond) + Timeout,
             ok = notify_sessions(Name, Deadline),
             ok = await_requests(Name, Deadline),
@@ -162,6 +208,15 @@ ws_opts(Name) ->
     #{ws_opts := WsOpts} = persistent_term:get(?KEY(Name)),
     WsOpts.
 
+-doc "The compiled route table of the listener `Ref`, if it serves Arizona routes.".
+-spec find_table(Ref) -> {ok, arizona_route_table:table()} | error when
+    Ref :: atom().
+find_table(Ref) ->
+    case persistent_term:get(?KEY(Ref), undefined) of
+        #{table := Table} -> {ok, Table};
+        undefined -> error
+    end.
+
 -doc "The largest request body the listener `Name` lets a controller read.".
 -spec max_content_length(Name) -> non_neg_integer() when
     Name :: atom().
@@ -206,19 +261,9 @@ sessions(Name) ->
 
 start_new(Name, #{routes := Routes} = Opts) ->
     Tls = tls(Opts),
-    BuildOpts = #{
-        compress => maps:get(compress, Opts, true),
-        error_page => maps:get(error_page, Opts, {arizona_error_page, render})
-    },
-    Table = arizona_route_table:compile(Routes, BuildOpts, ?MODULE),
+    Stash = stash(Routes, Opts),
     {ok, _} = application:ensure_all_started(cowboy),
-    persistent_term:put(?KEY(Name), #{
-        routes => Routes,
-        build_opts => BuildOpts,
-        table => Table,
-        ws_opts => maps:merge(?WS_OPTS, maps:get(ws_opts, Opts, #{})),
-        max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH)
-    }),
+    persistent_term:put(?KEY(Name), Stash#{owner => self}),
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
     ProtoOpts = maps:merge(
         #{env => #{dispatch => Dispatch}, enable_connect_protocol => true},
@@ -232,6 +277,33 @@ start_new(Name, #{routes := Routes} = Opts) ->
             persistent_term:erase(?KEY(Name)),
             Error
     end.
+
+stop_listener(Name) ->
+    %% The listener goes first: a request still in flight reads the table.
+    Result = cowboy:stop_listener(Name),
+    persistent_term:erase(?KEY(Name)),
+    ok = arizona_server_registry:listener_down(Name),
+    Result.
+
+%% What a request on the listener reads: the compiled routes and the per-session
+%% limits, the same whether this adapter started the listener or mounted on it.
+stash(Routes, Opts) ->
+    BuildOpts = #{
+        compress => maps:get(compress, Opts, true),
+        error_page => maps:get(error_page, Opts, {arizona_error_page, render})
+    },
+    #{
+        routes => Routes,
+        build_opts => BuildOpts,
+        table => arizona_route_table:compile(Routes, BuildOpts, ?MODULE),
+        ws_opts => maps:merge(?WS_OPTS, maps:get(ws_opts, Opts, #{})),
+        max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH)
+    }.
+
+suspend_owned(#{owner := self}, Name) ->
+    ranch:suspend_listener(Name);
+suspend_owned(#{owner := other}, _Name) ->
+    ok.
 
 start_listener(Name, none, TransportOpts, ProtoOpts) ->
     cowboy:start_clear(Name, TransportOpts, ProtoOpts);
