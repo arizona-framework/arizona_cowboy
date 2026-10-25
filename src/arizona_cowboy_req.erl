@@ -2,10 +2,10 @@
 -moduledoc """
 Cowboy adapter for the `arizona_req` behaviour.
 
-Implements the parsing callbacks by delegating each to the matching
-`cowboy_req` primitive. `new/1` wraps a raw cowboy request in an
-`arizona_req:request()` with `method` and `path` eagerly populated
-and everything else lazy-loaded on first access.
+The raw value is Cowboy's request map. Path bindings are the ones
+`arizona_route_table` matched, stored on the request under Cowboy's own
+`bindings` key (binary names, percent-decoded values), since Cowboy's router
+only saw the adapter's catch-all route.
 """.
 
 -behaviour(arizona_req).
@@ -25,16 +25,15 @@ and everything else lazy-loaded on first access.
 -export([parse_cookies/1]).
 -export([parse_headers/1]).
 -export([read_body/1]).
+-export([scheme/1]).
+-export([peer/1]).
 -export([resolve_route/3]).
 
 %% --------------------------------------------------------------------
 %% API Functions
 %% --------------------------------------------------------------------
 
--doc """
-Wraps a cowboy request in an `arizona_req:request()` with `method`
-and `path` eagerly populated.
-""".
+-doc "Wraps a Cowboy request in an `arizona_req:request()`.".
 -spec new(CowboyReq) -> arizona_req:request() when
     CowboyReq :: cowboy_req:req().
 new(CowboyReq) ->
@@ -47,61 +46,80 @@ new(CowboyReq) ->
 %% arizona_req behaviour callbacks
 %% --------------------------------------------------------------------
 
--spec parse_bindings(CowboyReq) -> arizona_req:bindings() when
-    CowboyReq :: cowboy_req:req().
+-spec parse_bindings(cowboy_req:req()) -> arizona_req:bindings().
 parse_bindings(CowboyReq) ->
-    %% Cowboy parses `:param` segments into atom keys. Convert to binary
-    %% keys so both adapters expose the same wire-derived shape and the
-    %% "binary keys for wire-derived data" rule holds.
-    maps:fold(
-        fun(K, V, Acc) -> Acc#{atom_to_binary(K, utf8) => V} end,
-        #{},
-        cowboy_req:bindings(CowboyReq)
-    ).
+    maps:get(bindings, CowboyReq, #{}).
 
--spec parse_params(CowboyReq) -> arizona_req:params() when
-    CowboyReq :: cowboy_req:req().
+-spec parse_params(cowboy_req:req()) -> arizona_req:params().
 parse_params(CowboyReq) ->
     cowboy_req:parse_qs(CowboyReq).
 
--spec parse_cookies(CowboyReq) -> arizona_req:cookies() when
-    CowboyReq :: cowboy_req:req().
+-spec parse_cookies(cowboy_req:req()) -> arizona_req:cookies().
 parse_cookies(CowboyReq) ->
     cowboy_req:parse_cookies(CowboyReq).
 
--spec parse_headers(CowboyReq) -> arizona_req:headers() when
-    CowboyReq :: cowboy_req:req().
+%% Cowboy already lowercases names and combines a repeated field.
+-spec parse_headers(cowboy_req:req()) -> arizona_req:headers().
 parse_headers(CowboyReq) ->
     cowboy_req:headers(CowboyReq).
 
--spec read_body(CowboyReq) -> {arizona_req:body(), CowboyReq} when
+-spec read_body(CowboyReq) ->
+    {ok, arizona_req:body(), CowboyReq} | {error, arizona_req:body_error()}
+when
     CowboyReq :: cowboy_req:req().
-read_body(CowboyReq) ->
-    {ok, Body, CowboyReq1} = cowboy_req:read_body(CowboyReq),
-    {Body, CowboyReq1}.
+read_body(#{ref := Listener} = CowboyReq) ->
+    try
+        read_body(CowboyReq, [], 0, arizona_cowboy_server:max_content_length(Listener))
+    catch
+        exit:{timeout, _} -> {error, timeout};
+        exit:timeout -> {error, timeout}
+    end.
+
+-spec scheme(cowboy_req:req()) -> arizona_req:scheme().
+scheme(CowboyReq) ->
+    case cowboy_req:scheme(CowboyReq) of
+        ~"https" -> https;
+        ~"http" -> http
+    end.
+
+-spec peer(cowboy_req:req()) -> {inet:ip_address(), inet:port_number()}.
+peer(CowboyReq) ->
+    cowboy_req:peer(CowboyReq).
 
 -doc """
-Resolves a path to `{Handler, RouteOpts, Request}` by running the
-Cowboy router.
-
-Returns the handler's static route options (including its `bindings`
-config) untouched, plus a navigate-scoped `arizona_req:request()`
-synthesized from the stored upgrade cowboy req with the new path and
-query applied.
+Resolves a navigate target against the routes of the listener that accepted
+`CowboyReq`, matched as a `GET` (an HTTP/2 WebSocket upgrade is a `CONNECT`).
+`error` for anything but a live route; never crashes, never replies.
 """.
--spec resolve_route(Path, Qs, Req) -> {Handler, RouteOpts, ArzReq} when
+-spec resolve_route(Path, Qs, CowboyReq) -> {ok, Handler, RouteOpts, ArzReq} | error when
     Path :: arizona_req:path(),
     Qs :: arizona_req:qs(),
-    Req :: cowboy_req:req(),
+    CowboyReq :: cowboy_req:req(),
     Handler :: module(),
     RouteOpts :: arizona_live:route_opts(),
     ArzReq :: arizona_req:request().
-resolve_route(Path, Qs, Req) ->
-    NavReq = Req#{path => Path, qs => Qs},
-    {ok, ResolvedReq, Env} = cowboy_router:execute(
-        NavReq,
-        #{dispatch => {persistent_term, arizona_dispatch}}
-    ),
-    Opts = maps:get(handler_opts, Env),
-    ArzReq = new(ResolvedReq),
-    {maps:get(handler, Opts), maps:without([handler], Opts), ArzReq}.
+resolve_route(Path, Qs, #{ref := Listener} = CowboyReq) when is_binary(Path) ->
+    case arizona_route_table:match(~"GET", Path, arizona_cowboy_server:table(Listener)) of
+        {ok, #{kind := live, target := #{handler := Handler} = Live}, Bindings} ->
+            NavReq = CowboyReq#{path => Path, qs => Qs, bindings => Bindings},
+            {ok, Handler, maps:without([handler], Live), new(NavReq)};
+        _NotALivePage ->
+            error
+    end;
+resolve_route(_Path, _Qs, _CowboyReq) ->
+    error.
+
+%% --------------------------------------------------------------------
+%% Internal functions
+%% --------------------------------------------------------------------
+
+%% A body larger than `Max` is refused (`too_large`) rather than buffered.
+read_body(CowboyReq0, Acc, Size, Max) ->
+    case cowboy_req:read_body(CowboyReq0) of
+        {ok, Data, CowboyReq} when Size + byte_size(Data) =< Max ->
+            {ok, iolist_to_binary(lists:reverse([Data | Acc])), CowboyReq};
+        {more, Data, CowboyReq} when Size + byte_size(Data) =< Max ->
+            read_body(CowboyReq, [Data | Acc], Size + byte_size(Data), Max);
+        {_OkOrMore, _Data, _CowboyReq} ->
+            {error, too_large}
+    end.

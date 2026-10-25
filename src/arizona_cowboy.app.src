@@ -5,7 +5,9 @@
     {applications, [
         kernel,
         stdlib,
-        arizona,
+        %% No `arizona`: the consumer depends on it already, and arizona's test
+        %% profile depends on this package, which a dependency back on arizona
+        %% would make a cycle rebar3 refuses (see rebar.config).
         cowboy
     ]},
     {env, []},
