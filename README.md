@@ -10,7 +10,7 @@ suite that verifies it, are described in Arizona's
 
 ## Requirements
 
-- Erlang/OTP 29 or newer
+- Erlang/OTP 28 or newer
 - [Arizona](https://github.com/arizona-framework/arizona) 0.4 or newer
 
 ## Installation

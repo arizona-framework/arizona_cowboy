@@ -161,6 +161,46 @@ jobs:
       - name: Conformance
         run: make test-conformance
 
+  test-otp:
+    # The other jobs run the .tool-versions OTP (the newest supported). This one
+    # runs every older release rebar.config's minimum_otp_vsn admits, so syntax or
+    # an API newer than the minimum fails here instead of on a user's build. Keep
+    # the list in step with minimum_otp_vsn.
+    name: Test (OTP ${{ matrix.otp }})
+
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        otp: ["28"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: erlef/setup-beam@fc68ffb90438ef2936bbb3251622353b3dcb2f93 # v1.24
+        id: setup-beam
+        with:
+          otp-version: ${{ matrix.otp }}
+          rebar3-version: "3.27.0"
+
+      # No _build cache: the test profile's arizona is a git dep on a branch,
+      # which rebar3 never refetches once in _build.
+      - name: Cache rebar3
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.cache/rebar3
+          key: "\
+            rebar3-${{ runner.os }}-otp-${{ steps.setup-beam.outputs.otp-version }}-\
+            config-${{ hashFiles('rebar.config') }}"
+          restore-keys: rebar3-${{ runner.os }}-otp-${{ steps.setup-beam.outputs.otp-version }}-
+
+      - name: Test
+        run: make test-erl
+
+      - name: Conformance
+        run: make test-conformance
+
   artifacts:
     name: Verify artifacts
 
