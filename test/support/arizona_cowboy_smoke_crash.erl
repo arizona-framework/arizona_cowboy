@@ -5,7 +5,7 @@
 
 %% A page whose mount raises, so its GET answers with the listener's 500.
 
--spec mount(az:bindings()) -> az:mount_ret().
+-spec mount(az:bindings()) -> no_return().
 mount(Bindings) ->
     error({crash_on_mount, Bindings}).
 
