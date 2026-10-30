@@ -13,9 +13,17 @@ against this package from arizona's test profile.
 -export([serves_a_controller_route/1]).
 -export([answers_unknown_paths_and_methods/1]).
 -export([stops_once/1]).
+-export([error_page_is_threaded_only_when_set/1]).
+-export([dev_crash_renders_the_configured_page/1]).
 
 all() ->
-    [serves_a_controller_route, answers_unknown_paths_and_methods, stops_once].
+    [
+        serves_a_controller_route,
+        answers_unknown_paths_and_methods,
+        stops_once,
+        error_page_is_threaded_only_when_set,
+        dev_crash_renders_the_configured_page
+    ].
 
 init_per_suite(Config) ->
     {ok, _} = application:ensure_all_started(arizona),
@@ -44,6 +52,52 @@ stops_once(Config) when is_list(Config) ->
     }),
     ?assertEqual(ok, arizona_cowboy_server:stop(smoke_stop)),
     ?assertEqual({error, not_found}, arizona_cowboy_server:stop(smoke_stop)).
+
+%% Core has no default error page, so the listener passes `error_page` on to
+%% its live routes only when its config sets one.
+error_page_is_threaded_only_when_set(Config) when is_list(Config) ->
+    {ok, _} = arizona_cowboy_server:start(smoke_no_page, #{
+        transport_opts => [{port, pick_port()}],
+        routes => []
+    }),
+    {ok, _} = arizona_cowboy_server:start(smoke_page, #{
+        transport_opts => [{port, pick_port()}],
+        routes => [],
+        error_page => {my_error_page, render}
+    }),
+    try
+        ?assertEqual(#{compress => true}, build_opts(smoke_no_page)),
+        ?assertEqual(
+            #{compress => true, error_page => {my_error_page, render}}, build_opts(smoke_page)
+        )
+    after
+        ok = arizona_cowboy_server:stop(smoke_no_page),
+        ok = arizona_cowboy_server:stop(smoke_page)
+    end.
+
+%% In dev (the reload URL set), a page crash renders the listener's error page.
+dev_crash_renders_the_configured_page(Config) when is_list(Config) ->
+    Port = pick_port(),
+    {ok, _} = arizona_cowboy_server:start(smoke_dev, #{
+        transport_opts => [{port, Port}],
+        routes => [{live, ~"/crash", arizona_cowboy_smoke_crash, #{}}],
+        error_page => {arizona_error_page, render}
+    }),
+    ok = persistent_term:put(arizona_reload_url, ~"/arizona/reload"),
+    try
+        {Status, Body} = request([{port, Port}], ~"GET", ~"/crash"),
+        ?assertEqual(500, Status),
+        ?assertNotEqual(nomatch, binary:match(Body, ~"<title>500 -- Server Error</title>")),
+        ?assertNotEqual(nomatch, binary:match(Body, ~"crash_on_mount"))
+    after
+        true = persistent_term:erase(arizona_reload_url),
+        ok = arizona_cowboy_server:stop(smoke_dev)
+    end.
+
+%% The build options a listener's routes were compiled with.
+build_opts(Name) ->
+    #{build_opts := BuildOpts} = persistent_term:get({arizona_cowboy_server, Name}),
+    BuildOpts.
 
 %% A port the OS just handed out, so parallel runs do not collide.
 pick_port() ->

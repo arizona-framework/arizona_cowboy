@@ -36,7 +36,9 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   bytes (default `10485760`); a larger one reads as `{error, too_large}`.
 - `compress` -- `true` (default) compresses pages and assets
   (`arizona_route:transforms/2`).
-- `error_page` -- `{Module, Function}` rendered on a page crash.
+- `error_page` -- `{Module, Function}` template rendered on a page crash in
+  dev. Unset by default: a dev crash is then served as plain text; set
+  `{arizona_error_page, render}` for Arizona's HTML dev page.
 - `proto_opts` -- merged into Cowboy's protocol options. `enable_connect_protocol`
   is `true` by default, so a client may open a WebSocket over HTTP/2 (RFC 8441).
 - `ws_opts` -- merged into the `cowboy_websocket` options of every live session
@@ -288,10 +290,10 @@ stop_listener(Name) ->
 %% What a request on the listener reads: the compiled routes and the per-session
 %% limits, the same whether this adapter started the listener or mounted on it.
 stash(Routes, Opts) ->
-    BuildOpts = #{
-        compress => maps:get(compress, Opts, true),
-        error_page => maps:get(error_page, Opts, {arizona_error_page, render})
-    },
+    %% `error_page` rides along only when the listener sets one.
+    BuildOpts = maps:merge(
+        #{compress => maps:get(compress, Opts, true)}, maps:with([error_page], Opts)
+    ),
     #{
         routes => Routes,
         build_opts => BuildOpts,
