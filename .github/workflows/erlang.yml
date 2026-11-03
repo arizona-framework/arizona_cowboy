@@ -50,7 +50,10 @@ jobs:
           otp="${{ steps.setup-beam.outputs.otp-version }}"
           cfg_hash="${{ hashFiles('rebar.config') }}"
           lock_hash="${{ hashFiles('rebar.lock') }}"
-          prefix="_build-${os}-otp-${otp}-cfg-${cfg_hash}-"
+          # The test profile's arizona is a git dep on a branch, which rebar3 never
+          # refetches once in _build, so a new arizona commit must miss the cache.
+          arizona=$(git ls-remote https://github.com/arizona-framework/arizona.git refs/heads/main | cut -f1)
+          prefix="_build-${os}-otp-${otp}-cfg-${cfg_hash}-arizona-${arizona}-"
           echo "prefix=${prefix}" >> "${GITHUB_OUTPUT}"
           echo "key=${prefix}lock-${lock_hash}" >> "${GITHUB_OUTPUT}"
 
