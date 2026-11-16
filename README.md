@@ -11,10 +11,7 @@ suite that verifies it, are described in Arizona's
 ## Requirements
 
 - Erlang/OTP 28 or newer
-- [Arizona](https://github.com/arizona-framework/arizona): the first release after 0.4.0, or
-  newer. Its route matcher decodes a path escape to its octet, UTF-8 or not, and keeps a malformed
-  one as written; 0.4.0's raises on both, so with it `/items/%FF`, `/items/%G1` and
-  `/files/%FF` answer `500`
+- [Arizona](https://github.com/arizona-framework/arizona) 0.4 or newer
 
 ## Installation
 
