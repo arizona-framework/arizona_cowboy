@@ -38,6 +38,7 @@ its own.
 -export([max_query_keys_infinity_counts_nothing/1]).
 -export([max_query_keys_must_be_a_count_or_infinity/1]).
 -export([a_run_of_empty_pairs_hides_no_key_after_it/1]).
+-export([parse_qs_builds_nothing_for_empty_pairs/1]).
 -export([a_cors_preflight_counts_its_query_keys/1]).
 -export([arizona_keys_count_everywhere_but_the_upgrade/1]).
 -export([max_query_keys_sets_the_limit/1]).
@@ -72,6 +73,7 @@ all() ->
         max_query_keys_infinity_counts_nothing,
         max_query_keys_must_be_a_count_or_infinity,
         a_run_of_empty_pairs_hides_no_key_after_it,
+        parse_qs_builds_nothing_for_empty_pairs,
         a_cors_preflight_counts_its_query_keys,
         arizona_keys_count_everywhere_but_the_upgrade,
         max_query_keys_sets_the_limit
@@ -464,12 +466,36 @@ max_query_keys_must_be_a_count_or_infinity(Config) when is_list(Config) ->
 a_run_of_empty_pairs_hides_no_key_after_it(Config) when is_list(Config) ->
     [
         begin
-            Qs = <<(binary:copy(~"&", N))/binary, "a">>,
+            Run = binary:copy(~"&", N),
+            Qs = <<Run/binary, "a">>,
             ?assertNot(arizona_cowboy_req:within_key_limit(Qs, 0, [])),
-            ?assert(arizona_cowboy_req:within_key_limit(Qs, 1, []))
+            ?assert(arizona_cowboy_req:within_key_limit(Qs, 1, [])),
+            ?assertEqual(
+                [{~"a", true}, {~"b", true}],
+                arizona_cowboy_req:parse_qs(<<Qs/binary, Run/binary, "b", Run/binary>>)
+            )
         end
      || N <- [1, 63, 64, 65, 127, 128, 129]
     ].
+
+%% An empty pair is skipped, not built and then dropped: 20 MB of them around
+%% one key parse within a heap of a million words, about 8 MB on a 64-bit node.
+parse_qs_builds_nothing_for_empty_pairs(Config) when is_list(Config) ->
+    Run = binary:copy(~"&", 10485760),
+    Qs = <<Run/binary, "a=1", Run/binary>>,
+    Self = self(),
+    {Pid, Monitor} = spawn_opt(
+        fun() -> Self ! {parsed, arizona_cowboy_req:parse_qs(Qs)} end,
+        [monitor, {max_heap_size, #{size => 1000000, kill => true, error_logger => false}}]
+    ),
+    receive
+        {'DOWN', Monitor, process, Pid, Reason} -> ?assertEqual(normal, Reason)
+    after 10000 -> error(parse_timeout)
+    end,
+    receive
+        {parsed, Params} -> ?assertEqual([{~"a", ~"1"}], Params)
+    after 0 -> error(no_result)
+    end.
 
 %% A preflight is a request to the route like any other.
 a_cors_preflight_counts_its_query_keys(Config) ->

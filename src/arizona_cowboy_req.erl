@@ -73,8 +73,8 @@ check that first, with `within_key_limit/3`.
 parse_qs(<<>>) ->
     [];
 parse_qs(Qs) ->
-    {Amp, Eq, Plus, Pct} = persistent_term:get(?MODULE),
-    Pairs = [Pair || Pair <- binary:split(Qs, Amp, [global]), Pair =/= <<>>],
+    {Amp, Eq, Plus, Pct, AmpRun} = persistent_term:get(?MODULE),
+    Pairs = pairs(Qs, Amp, AmpRun),
     %% One scan of the whole string first: with no `+` or `%` in it, the usual
     %% `?id=123&limit=50`, no key or value needs decoding.
     case is_plain(Qs, Plus, Pct) of
@@ -98,7 +98,7 @@ its number of `&`.
 within_key_limit(_Qs, infinity, _Uncounted) ->
     true;
 within_key_limit(Qs, MaxKeys, Uncounted) ->
-    {Amp, Eq, _Plus, _Pct} = persistent_term:get(?MODULE),
+    {Amp, Eq, _Plus, _Pct, _AmpRun} = persistent_term:get(?MODULE),
     count_keys(skip_empty(Qs), MaxKeys, Uncounted, Amp, Eq).
 
 %% --------------------------------------------------------------------
@@ -179,24 +179,21 @@ resolve_route(_Path, _Qs, _CowboyReq) ->
 %% Internal functions
 %% --------------------------------------------------------------------
 
-%% The one-byte patterns `parse_qs/1` and `within_key_limit/3` split and scan
-%% with, compiled once at load rather than on every call.
+%% The patterns `parse_qs/1` and `within_key_limit/3` split and scan with,
+%% compiled once at load rather than on every call.
 init_patterns() ->
     persistent_term:put(?MODULE, {
         binary:compile_pattern(~"&"),
         binary:compile_pattern(~"="),
         binary:compile_pattern(~"+"),
-        binary:compile_pattern(~"%")
+        binary:compile_pattern(~"%"),
+        binary:compile_pattern(?AMP64)
     }).
 
 count_keys(<<>>, _Left, _Uncounted, _Amp, _Eq) ->
     true;
 count_keys(Qs, Left, Uncounted, Amp, Eq) ->
-    {Pair, Rest} =
-        case binary:match(Qs, Amp) of
-            nomatch -> {Qs, <<>>};
-            {At, 1} -> {binary:part(Qs, 0, At), binary:part(Qs, At + 1, byte_size(Qs) - At - 1)}
-        end,
+    {Pair, Rest} = next_pair(Qs, Amp),
     [Key | _Value] = binary:split(Pair, Eq),
     case lists:member(Key, Uncounted) of
         true -> count_keys(skip_empty(Rest), Left, lists:delete(Key, Uncounted), Amp, Eq);
@@ -204,6 +201,32 @@ count_keys(Qs, Left, Uncounted, Amp, Eq) ->
         false -> count_keys(skip_empty(Rest), Left - 1, Uncounted, Amp, Eq)
     end.
 
+%% The non-empty pairs of `Qs`: one split of the whole string, its empty pieces
+%% dropped as it splits (`trim_all`), unless it holds a run of 64 empty pairs
+%% or more, which is then skipped rather than searched `&` by `&`. Looking for
+%% such a run costs little: a long pattern is searched in long strides.
+pairs(Qs, Amp, AmpRun) ->
+    case binary:match(Qs, AmpRun) of
+        nomatch -> binary:split(Qs, Amp, [global, trim_all]);
+        _Run -> split_pairs(skip_empty(Qs), Amp)
+    end.
+
+%% The non-empty pairs of `Qs`, which starts with one (or is empty).
+split_pairs(<<>>, _Amp) ->
+    [];
+split_pairs(Qs, Amp) ->
+    {Pair, Rest} = next_pair(Qs, Amp),
+    [Pair | split_pairs(skip_empty(Rest), Amp)].
+
+%% The pair `Qs` starts with, and what follows its `&`.
+next_pair(Qs, Amp) ->
+    case binary:match(Qs, Amp) of
+        nomatch -> {Qs, <<>>};
+        {At, 1} -> {binary:part(Qs, 0, At), binary:part(Qs, At + 1, byte_size(Qs) - At - 1)}
+    end.
+
+%% A run of empty pairs skipped, 64 per comparison: never a pair built and
+%% dropped, nor a search per `&`.
 skip_empty(<<Run:64/binary, Rest/binary>>) when Run =:= ?AMP64 ->
     skip_empty(Rest);
 skip_empty(<<$&, Rest/binary>>) ->
