@@ -20,6 +20,7 @@ its own.
 -export([paths_no_route_matches_are_404/1]).
 -export([options_star_is_no_arizona_path/1]).
 -export([misses_reach_routes_given_in_proto_opts/1]).
+-export([misses_reach_a_dispatch_given_alone_in_proto_opts/1]).
 -export([asset_missing_non_utf8_file_is_404/1]).
 -export([asset_non_utf8_file_is_served/1]).
 -export([asset_link_to_a_non_utf8_name_is_followed_inside_only/1]).
@@ -56,6 +57,7 @@ all() ->
         paths_no_route_matches_are_404,
         options_star_is_no_arizona_path,
         misses_reach_routes_given_in_proto_opts,
+        misses_reach_a_dispatch_given_alone_in_proto_opts,
         asset_missing_non_utf8_file_is_404,
         asset_non_utf8_file_is_served,
         asset_link_to_a_non_utf8_name_is_followed_inside_only,
@@ -233,6 +235,25 @@ misses_reach_routes_given_in_proto_opts(Config) when is_list(Config) ->
         ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/nope/%G1"))
     after
         ok = arizona_cowboy_server:stop(escapes_owned)
+    end.
+
+%% An `env` alone names the router's dispatch behind the adapter's default
+%% middlewares: its routes are served, and a miss is left to that router.
+misses_reach_a_dispatch_given_alone_in_proto_opts(Config) when is_list(Config) ->
+    Port = pick_port(),
+    Dispatch = cowboy_router:compile([{'_', [{"/owned", arizona_cowboy_owner_handler, []}]}]),
+    {ok, _} = arizona_cowboy_server:start(escapes_env_only, #{
+        transport_opts => [{port, Port}],
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}],
+        proto_opts => #{env => #{dispatch => Dispatch}}
+    }),
+    try
+        ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q")),
+        ?assertEqual({200, ~"owner"}, request([{port, Port}], ~"GET", ~"/owned")),
+        ?assertMatch({404, _}, request([{port, Port}], ~"GET", ~"/nope")),
+        ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/nope/%G1"))
+    after
+        ok = arizona_cowboy_server:stop(escapes_env_only)
     end.
 
 %% `OPTIONS *` addresses the server, not a resource: a route whose pattern would
