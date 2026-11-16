@@ -11,7 +11,9 @@ suite that verifies it, are described in Arizona's
 ## Requirements
 
 - Erlang/OTP 28 or newer
-- [Arizona](https://github.com/arizona-framework/arizona) 0.4 or newer
+- [Arizona](https://github.com/arizona-framework/arizona): the first release after 0.4.0, or
+  newer. Its route matcher keeps a malformed path escape (`/items/%G1`) as written; with 0.4.0's,
+  which raises on one, such a request answers `500`
 
 ## Installation
 
