@@ -55,6 +55,24 @@ HTTP/1.1 by ALPN, and a live session may open its WebSocket over HTTP/2.
 Cowboy's own protocol options go in `proto_opts`; see
 `arizona_cowboy_server` for the rest.
 
+## Escapes in a URL
+
+Requests are read the way Arizona's other adapters read them, not the way
+Cowboy's own router and query parser do:
+
+- A `%HH` escape decodes to its octet, UTF-8 or not: `/files/%FF` looks up the
+  file whose name is the byte 255, and answers `404` when there is none.
+- A malformed escape (`%G1`, a trailing `%4` or `%`) is kept as written, as
+  browsers send such a URL as typed. A path segment holding one is matched
+  whole (`/items/a%41%G1` captures `a%41%G1`), and so is a query key or value
+  (`?locale=%G1` reads `%G1`), over HTTP, on the WebSocket upgrade and on a
+  live navigate alike.
+- In the query string `+` is a space; in a path it stays a `+`.
+
+`arizona_cowboy_middleware` heads the listener's middleware chain, so Arizona's
+route matcher sees each path before Cowboy's router does; a path no Arizona
+route matches reaches the router as before.
+
 ## On a listener another framework owns
 
 `arizona_cowboy_server:mount/2` serves Arizona routes on a Cowboy listener something else
@@ -78,7 +96,7 @@ ok = arizona_cowboy_server:mount(my_listener, #{routes => ArizonaRoutes}).
 | `arizona_cowboy_server` | The `arizona_server` adapter: boots, drains and stops listeners |
 | `arizona_cowboy_handler` | The listener's one handler: routes with `arizona_route_table` |
 | `arizona_cowboy_req` | The `arizona_req` adapter |
-| `arizona_cowboy_middleware` | Serves mounted Arizona routes on a listener another framework owns |
+| `arizona_cowboy_middleware` | Serves Arizona routes ahead of any Cowboy router, on this adapter's listener or one another framework owns |
 
 ## Development
 
