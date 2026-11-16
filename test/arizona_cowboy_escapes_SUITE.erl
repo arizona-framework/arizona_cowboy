@@ -434,10 +434,9 @@ max_query_keys_must_be_a_count_or_infinity(Config) when is_list(Config) ->
             Opts = #{transport_opts => [{port, pick_port()}], max_query_keys => Bad, routes => []},
             ?assertError({bad_max_query_keys, Bad}, arizona_cowboy_server:start(escapes_bad, Opts)),
             ?assertError({bad_max_query_keys, Bad}, arizona_cowboy_server:mount(escapes_bad, Opts)),
-            ?assertMatch(
-                #{general := _},
-                arizona_cowboy_server:format_error({bad_max_query_keys, Bad}, [])
-            )
+            #{general := Message} =
+                arizona_cowboy_server:format_error({bad_max_query_keys, Bad}, []),
+            ?assertNotEqual(nomatch, string:find(Message, ~"max_query_keys"))
         end
      || Bad <- [-1, 100.0, ~"100", unlimited]
     ],
