@@ -77,10 +77,14 @@ route matcher sees each path before Cowboy's router does; a path no Arizona
 route matches reaches the router as before.
 
 A query string may hold at most `max_query_keys` keys (default `100`, the limit
-Cowboy's own parser applies), empty pairs not counted. One with more is answered
-`400` over HTTP and on the WebSocket upgrade, as Cowboy answers it; a live
-navigate to it is not served in place but becomes a full page load, which gets
-that `400`. Roadrunner's parser has no such cap.
+Cowboy's own parser applies; `infinity` for none). The keys are counted once,
+before anything reads the query: empty pairs are not keys, and on the WebSocket
+upgrade neither are the ones Arizona's client adds (`_az_path` and the like). A
+request to a live or controller route, or an upgrade, with more is answered
+`400`, whether or not the route reads its query; asset routes never count. A
+live navigate or patch to such a URL is not served in place but becomes a full
+page load, which gets that `400`, so every path answers as an HTTP request
+would. Roadrunner has no such cap.
 
 ## On a listener another framework owns
 

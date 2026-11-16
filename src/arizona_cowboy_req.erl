@@ -9,11 +9,13 @@ matches an Arizona route.
 
 The query string is parsed by `parse_qs/1` rather than Cowboy's
 `cowboy_req:parse_qs/1`, which refuses a malformed escape with `400`. Its keys
-are counted before anything reads it (`within_key_limit/3`): a request to a
-live or controller route, or a WebSocket upgrade, whose query holds more than
-the listener's `max_query_keys` is answered `400`, and `resolve_route/3` leaves
-a navigate to one unresolved, so the client loads it over HTTP and gets that
-`400` too.
+are counted once, before anything reads it (`within_key_limit/3`): a request
+to a live or controller route, or a WebSocket upgrade, whose query holds more
+than the listener's `max_query_keys` is answered `400` whether or not the route
+reads it (on the upgrade, the keys Arizona's client adds are not counted), and
+`resolve_route/3` leaves a navigate or patch to one unresolved, so the client
+loads it over HTTP and gets that `400` too. `parse_params/1` itself sets no
+limit.
 """.
 
 -behaviour(arizona_req).
@@ -147,9 +149,10 @@ peer(CowboyReq) ->
 -doc """
 Resolves a navigate target against the routes of the listener that accepted
 `CowboyReq`, matched as a `GET` (an HTTP/2 WebSocket upgrade is a `CONNECT`).
-`error` for anything but a live route, and for a query string with more keys
-than the listener allows (which an HTTP request to it is answered `400` for);
-never crashes, never replies.
+`error` for anything but a live route, and for a query string holding more
+keys than the listener's `max_query_keys` (counted by `within_key_limit/3`,
+with nothing uncounted), which an HTTP request to that URL is answered `400`
+for: the client then loads it over HTTP. Never crashes, never replies.
 """.
 -spec resolve_route(Path, Qs, CowboyReq) -> {ok, Handler, RouteOpts, ArzReq} | error when
     Path :: arizona_req:path(),
@@ -176,9 +179,8 @@ resolve_route(_Path, _Qs, _CowboyReq) ->
 %% Internal functions
 %% --------------------------------------------------------------------
 
-%% The patterns `parse_qs/1` splits and scans with, compiled once at load
-%% rather than on every call. Each is one byte: a search for one byte runs far
-%% faster than one for several.
+%% The one-byte patterns `parse_qs/1` and `within_key_limit/3` split and scan
+%% with, compiled once at load rather than on every call.
 init_patterns() ->
     persistent_term:put(?MODULE, {
         binary:compile_pattern(~"&"),
