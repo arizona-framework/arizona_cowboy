@@ -16,6 +16,11 @@ reads it (on the upgrade, the keys Arizona's client adds are not counted), and
 `resolve_route/3` leaves a navigate or patch to one unresolved, so the client
 loads it over HTTP and gets that `400` too. `parse_params/1` itself sets no
 limit.
+
+A request the handler serves carries the listener's `max_content_length` on the
+raw request, under the `arizona_max_content_length` key (`with_limits/2`), which
+`read_body/1` reads: a body is read under the limit of the listener the request
+arrived on, never looked up again.
 """.
 
 -behaviour(arizona_req).

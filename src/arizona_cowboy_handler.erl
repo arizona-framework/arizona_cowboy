@@ -1,11 +1,19 @@
 -module(arizona_cowboy_handler).
 -moduledoc """
-The Cowboy adapter's single handler: a request reaches it through
-`arizona_cowboy_middleware` -- a path an Arizona route matches, and, on a
-listener this adapter started with its default chain, any other path, answered
-`404` -- or through the router's catch-all route of a listener whose
-`proto_opts` replaces only its `middlewares` (a path neither Arizona nor those
-middlewares serve, answered `404` too). It routes with `arizona_route_table`.
+The Cowboy adapter's single handler, which routes with `arizona_route_table`. A
+request reaches it in one of two ways:
+
+- Through `arizona_cowboy_middleware`, along with the listener's routes the
+  middleware read: a path an Arizona route matches, and, on a listener this
+  adapter started with its default chain, any other path, answered `404`.
+- Through a Cowboy router's route to it, which names only the listener, whose
+  routes the handler then reads itself: the catch-all route of a listener this
+  adapter started whose `proto_opts` replaces its `middlewares`, or an owner's
+  own route to it. A path no Arizona route serves is answered `404`, and so is
+  every path while nothing is mounted. When those `middlewares` leave
+  `arizona_cowboy_middleware` out, every request, Arizona's routes included,
+  comes this way, so Cowboy's router answers a path holding a malformed escape
+  `400` before the handler sees it.
 
 What each route kind answers comes from core -- `arizona_http:reply/3` for a
 page, `arizona_ws:upgrade/3` for a WebSocket, `arizona_controller:dispatch/3`

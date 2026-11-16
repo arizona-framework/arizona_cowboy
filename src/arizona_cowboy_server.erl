@@ -325,7 +325,8 @@ start_new(Name, #{routes := Routes} = Opts) ->
     end.
 
 stop_listener(Name) ->
-    %% The listener goes first: a request still in flight reads the table.
+    %% The listener goes first, so no request arrives to find its routes gone
+    %% and be answered `404` while it is still accepting.
     Result = cowboy:stop_listener(Name),
     persistent_term:erase(?KEY(Name)),
     ok = arizona_server_registry:listener_down(Name),

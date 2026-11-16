@@ -46,11 +46,11 @@ ok = arizona_cowboy_server:mount(my_listener, #{routes => ArizonaRoutes}).
     Env :: cowboy_middleware:env().
 execute(#{ref := Ref, path := <<$/, _/binary>>} = Req, Env) ->
     case arizona_cowboy_server:find_listener(Ref) of
-        {ok, #{table := Table, answers_misses := AnswersMisses} = Listener} ->
+        {ok, #{table := Table, answers_misses := AnswersMisses} = Stash} ->
             case arizona_route_table:match(cowboy_req:method(Req), cowboy_req:path(Req), Table) of
-                not_found when AnswersMisses -> serve(Req, Env, Ref, Listener);
+                not_found when AnswersMisses -> serve(Req, Env, Ref, Stash);
                 not_found -> {ok, Req, Env};
-                _ArizonaPath -> serve(Req, Env, Ref, Listener)
+                _ArizonaPath -> serve(Req, Env, Ref, Stash)
             end;
         error ->
             {ok, Req, Env}
@@ -67,8 +67,8 @@ execute(Req, Env) ->
 %% (No Arizona loop hibernates, so `cowboy_handler` never suspends here.) The
 %% handler serves from the listener read here, not a second read an unmount
 %% could fall before.
-serve(Req, Env, Ref, Listener) ->
+serve(Req, Env, Ref, Stash) ->
     {ok, Req1, _Env1} = cowboy_handler:execute(Req, Env#{
-        handler => arizona_cowboy_handler, handler_opts => {Ref, Listener}
+        handler => arizona_cowboy_handler, handler_opts => {Ref, Stash}
     }),
     {stop, Req1}.
