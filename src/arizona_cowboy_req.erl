@@ -34,6 +34,14 @@ The query string is parsed by `parse_qs/1` rather than Cowboy's
 -export([resolve_route/3]).
 
 %% --------------------------------------------------------------------
+%% Macros
+%% --------------------------------------------------------------------
+
+-define(IS_HEX(C),
+    ((C >= $0 andalso C =< $9) orelse (C >= $a andalso C =< $f) orelse (C >= $A andalso C =< $F))
+).
+
+%% --------------------------------------------------------------------
 %% API Functions
 %% --------------------------------------------------------------------
 
@@ -56,8 +64,10 @@ browsers send such a URL as typed. Never fails.
 """.
 -spec parse_qs(Qs) -> [{binary(), binary() | true}] when
     Qs :: binary().
+parse_qs(<<>>) ->
+    [];
 parse_qs(Qs) ->
-    [parse_pair(Pair) || Pair <- binary:split(Qs, ~"&", [global]), Pair =/= <<>>].
+    scan(Qs, Qs, 0, plain, <<>>, none, []).
 
 %% --------------------------------------------------------------------
 %% arizona_req behaviour callbacks
@@ -130,35 +140,55 @@ resolve_route(_Path, _Qs, _CowboyReq) ->
 %% Internal functions
 %% --------------------------------------------------------------------
 
-parse_pair(Pair) ->
-    case binary:split(Pair, ~"=") of
-        [Key] -> {decode(Key), true};
-        [Key, Value] -> {decode(Key), decode(Value)}
-    end.
+%% One pass over the query string. Each key or value is the `Len` bytes from
+%% `Start`, read in one of three modes: `plain` while it holds no `+` or `%`
+%% (returned as that slice, no copy), `dec` once one decoded (built in `Acc`),
+%% and `raw` after an escape that does not decode (the slice again, its `+`
+%% turned to spaces). `Key` is `none` while reading a key.
+scan(<<$&, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) ->
+    scan(Rest, Rest, 0, plain, <<>>, none, emit(Start, Len, Mode, Acc, Key, Pairs));
+scan(<<$=, Rest/binary>>, Start, Len, Mode, Acc, none, Pairs) ->
+    scan(Rest, Rest, 0, plain, <<>>, {key, component(Start, Len, Mode, Acc)}, Pairs);
+scan(<<_Byte, Rest/binary>>, Start, Len, raw, Acc, Key, Pairs) ->
+    scan(Rest, Start, Len + 1, raw, Acc, Key, Pairs);
+scan(<<$+, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) ->
+    scan(Rest, Start, Len + 1, dec, <<(decoded(Start, Len, Mode, Acc))/binary, $\s>>, Key, Pairs);
+scan(<<$%, High, Low, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) when
+    ?IS_HEX(High), ?IS_HEX(Low)
+->
+    Octet = unhex(High) * 16 + unhex(Low),
+    scan(Rest, Start, Len + 3, dec, <<(decoded(Start, Len, Mode, Acc))/binary, Octet>>, Key, Pairs);
+scan(<<$%, Rest/binary>>, Start, Len, _Mode, Acc, Key, Pairs) ->
+    scan(Rest, Start, Len + 1, raw, Acc, Key, Pairs);
+scan(<<_Byte, Rest/binary>>, Start, Len, plain, Acc, Key, Pairs) ->
+    scan(Rest, Start, Len + 1, plain, Acc, Key, Pairs);
+scan(<<Byte, Rest/binary>>, Start, Len, dec, Acc, Key, Pairs) ->
+    scan(Rest, Start, Len + 1, dec, <<Acc/binary, Byte>>, Key, Pairs);
+scan(<<>>, Start, Len, Mode, Acc, Key, Pairs) ->
+    lists:reverse(emit(Start, Len, Mode, Acc, Key, Pairs)).
 
-decode(Component) ->
-    Spaced = binary:replace(Component, ~"+", ~" ", [global]),
-    unescape(Spaced, Spaced, <<>>).
+%% An empty pair (`&&`, a leading or trailing `&`) is skipped.
+emit(_Start, 0, _Mode, _Acc, none, Pairs) ->
+    Pairs;
+emit(Start, Len, Mode, Acc, none, Pairs) ->
+    [{component(Start, Len, Mode, Acc), true} | Pairs];
+emit(Start, Len, Mode, Acc, {key, Key}, Pairs) ->
+    [{Key, component(Start, Len, Mode, Acc)} | Pairs].
 
-%% `Spaced` whole when any escape in it does not decode.
-unescape(<<>>, _Spaced, Acc) ->
+component(Start, Len, plain, _Acc) ->
+    binary:part(Start, 0, Len);
+component(_Start, _Len, dec, Acc) ->
     Acc;
-unescape(<<$%, High, Low, Rest/binary>>, Spaced, Acc) ->
-    case {hex(High), hex(Low)} of
-        {H, L} when is_integer(H), is_integer(L) ->
-            unescape(Rest, Spaced, <<Acc/binary, (H * 16 + L)>>);
-        _NotHex ->
-            Spaced
-    end;
-unescape(<<$%, _Truncated/binary>>, Spaced, _Acc) ->
-    Spaced;
-unescape(<<Byte, Rest/binary>>, Spaced, Acc) ->
-    unescape(Rest, Spaced, <<Acc/binary, Byte>>).
+component(Start, Len, raw, _Acc) ->
+    binary:replace(binary:part(Start, 0, Len), ~"+", ~" ", [global]).
 
-hex(C) when C >= $0, C =< $9 -> C - $0;
-hex(C) when C >= $a, C =< $f -> C - $a + 10;
-hex(C) when C >= $A, C =< $F -> C - $A + 10;
-hex(_C) -> error.
+%% What is decoded so far, the slice read until now when nothing was.
+decoded(Start, Len, plain, _Acc) -> binary:part(Start, 0, Len);
+decoded(_Start, _Len, dec, Acc) -> Acc.
+
+unhex(C) when C =< $9 -> C - $0;
+unhex(C) when C =< $F -> C - $A + 10;
+unhex(C) -> C - $a + 10.
 
 %% A body larger than `Max` is refused (`too_large`) rather than buffered.
 read_body(CowboyReq0, Acc, Size, Max) ->
