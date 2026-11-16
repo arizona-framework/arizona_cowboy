@@ -315,13 +315,13 @@ start_new(Name, #{routes := Routes} = Opts) ->
     Stash = stash(Routes, Opts),
     {ok, _} = application:ensure_all_started(cowboy),
     UserProtoOpts = maps:get(proto_opts, Opts, #{}),
-    %% With the adapter's own chain, the router behind the middleware holds only
-    %% the catch-all to the handler, so the middleware answers every miss itself
-    %% rather than leave Cowboy's router to refuse a path it cannot parse.
-    OwnChain =
+    %% With the adapter's default chain, the router behind the middleware holds
+    %% only the catch-all to the handler, so the middleware answers every miss
+    %% itself rather than leave Cowboy's router to refuse a path it cannot parse.
+    DefaultChain =
         not is_map_key(middlewares, UserProtoOpts) andalso
             not is_map_key(env, UserProtoOpts),
-    persistent_term:put(?KEY(Name), Stash#{owner => self, answers_misses => OwnChain}),
+    persistent_term:put(?KEY(Name), Stash#{owner => self, answers_misses => DefaultChain}),
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
     ProtoOpts = maps:merge(
         #{

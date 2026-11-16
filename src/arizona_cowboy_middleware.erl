@@ -9,10 +9,10 @@ Place it before the owner's router in the listener's `middlewares`. A request
 whose path an Arizona route matches is answered by `arizona_cowboy_handler`,
 exactly as on a listener this adapter started, and the rest of the chain does
 not run; any other request continues down the chain untouched (on a listener
-`arizona_cowboy_server:start/2` started with its own chain, the handler answers
-it `404` instead, as its router holds nothing else). A path Arizona
-serves owns its methods too: a method no Arizona route allows there is answered
-`405` here rather than passed on.
+`arizona_cowboy_server:start/2` started with the adapter's default chain, the
+handler answers it `404` instead, as its router holds nothing else). A path
+Arizona serves owns its methods too: a method no Arizona route allows there is
+answered `405` here rather than passed on.
 
 Arizona's matcher sees the path before any Cowboy router, so a path Cowboy's
 router would refuse (a malformed escape such as `/items/%G1`, which
