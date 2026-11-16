@@ -35,6 +35,8 @@ its own.
 -export([within_key_limit_counts_non_empty_pairs/1]).
 -export([routes_that_never_read_the_query_still_apply_the_limit/1]).
 -export([a_long_run_of_empty_pairs_counts_nothing/1]).
+-export([max_query_keys_infinity_counts_nothing/1]).
+-export([max_query_keys_must_be_a_count_or_infinity/1]).
 -export([max_query_keys_sets_the_limit/1]).
 
 -define(LISTENER, escapes).
@@ -63,6 +65,8 @@ all() ->
         within_key_limit_counts_non_empty_pairs,
         routes_that_never_read_the_query_still_apply_the_limit,
         a_long_run_of_empty_pairs_counts_nothing,
+        max_query_keys_infinity_counts_nothing,
+        max_query_keys_must_be_a_count_or_infinity,
         max_query_keys_sets_the_limit
     ].
 
@@ -406,6 +410,38 @@ max_query_keys_sets_the_limit(Config) when is_list(Config) ->
     after
         ok = arizona_cowboy_server:stop(escapes_keys)
     end.
+
+max_query_keys_infinity_counts_nothing(Config) when is_list(Config) ->
+    Port = pick_port(),
+    {ok, _} = arizona_cowboy_server:start(escapes_no_limit, #{
+        transport_opts => [{port, Port}],
+        max_query_keys => infinity,
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}]
+    }),
+    try
+        {200, #{params := Params}} = echo([{port, Port}], <<"/q?", (keys(1000))/binary>>),
+        ?assertEqual(1000, length(Params)),
+        ?assert(arizona_cowboy_req:within_key_limit(keys(1000), infinity, []))
+    after
+        ok = arizona_cowboy_server:stop(escapes_no_limit)
+    end.
+
+%% A value that is no count would crash every request, or disable the limit
+%% unnoticed: refused when the listener starts or mounts.
+max_query_keys_must_be_a_count_or_infinity(Config) when is_list(Config) ->
+    [
+        begin
+            Opts = #{transport_opts => [{port, pick_port()}], max_query_keys => Bad, routes => []},
+            ?assertError({bad_max_query_keys, Bad}, arizona_cowboy_server:start(escapes_bad, Opts)),
+            ?assertError({bad_max_query_keys, Bad}, arizona_cowboy_server:mount(escapes_bad, Opts)),
+            ?assertMatch(
+                #{general := _},
+                arizona_cowboy_server:format_error({bad_max_query_keys, Bad}, [])
+            )
+        end
+     || Bad <- [-1, 100.0, ~"100", unlimited]
+    ],
+    ?assertEqual({error, not_found}, arizona_cowboy_server:stop(escapes_bad)).
 
 %% --------------------------------------------------------------------
 %% Helpers

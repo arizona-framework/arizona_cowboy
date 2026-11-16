@@ -84,14 +84,16 @@ parse_qs(Qs) ->
 Whether the raw query string `Qs` holds at most `MaxKeys` keys: its non-empty
 pairs, an empty one (`&&`, a leading or trailing `&`) counting for none. Each
 key in `Uncounted` (as written, before `=`) is not counted the first time it
-occurs; a repeat is. Counting stops at the first key past the limit, and a run
+occurs; a repeat is. `infinity` counts nothing. Counting stops at the first key past the limit, and a run
 of empty pairs is skipped without looking for each `&`, so the cost is bounded
 by the limit and the string's length, not by its number of `&`.
 """.
 -spec within_key_limit(Qs, MaxKeys, Uncounted) -> boolean() when
     Qs :: binary(),
-    MaxKeys :: non_neg_integer(),
+    MaxKeys :: non_neg_integer() | infinity,
     Uncounted :: [binary()].
+within_key_limit(_Qs, infinity, _Uncounted) ->
+    true;
 within_key_limit(Qs, MaxKeys, Uncounted) ->
     {Amp, Eq, _Plus, _Pct} = persistent_term:get(?MODULE),
     count_keys(skip_empty(Qs), MaxKeys, Uncounted, Amp, Eq).

@@ -39,10 +39,17 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   certs' traffic in cleartext.
 - `max_content_length` -- the largest request body a controller can read, in
   bytes (default `10485760`); a larger one reads as `{error, too_large}`.
-- `max_query_keys` -- the most keys a query string may hold (default `100`,
-  Cowboy's own limit). One with more is answered `400` over HTTP and on a
-  WebSocket upgrade, as Cowboy's parser has it answered, and a live navigate to
-  it becomes a full page load, which gets that `400`. Roadrunner has no such cap.
+- `max_query_keys` -- the most keys a query string may hold: a non-negative
+  integer (default `100`, Cowboy's own limit) or `infinity` for no limit; any
+  other value is refused when the listener starts or mounts
+  (`bad_max_query_keys`). Empty pairs are no keys, and on a WebSocket upgrade
+  neither are the ones Arizona's client adds (`_az_path`, `_az_reconnect`,
+  `_az_fps_follow`, `_az_caps`, each once). A request to a live or controller
+  route, or an upgrade, with more is answered `400`, whether or not the route
+  reads its query; an asset route never counts. A live navigate or patch to such
+  a URL is not served in place (`arizona_cowboy_req:resolve_route/3` answers
+  `error`), so the client loads it over HTTP and gets the same `400`.
+  Roadrunner has no such cap.
 - `compress` -- `true` (default) compresses pages and assets
   (`arizona_route:transforms/2`).
 - `error_page` -- `{Module, Function}` template rendered on a page crash in
@@ -241,7 +248,7 @@ max_content_length(Name) ->
     Max.
 
 -doc "The most keys a query string may hold on the listener `Name`.".
--spec max_query_keys(Name) -> non_neg_integer() when
+-spec max_query_keys(Name) -> non_neg_integer() | infinity when
     Name :: atom().
 max_query_keys(Name) ->
     #{max_query_keys := Max} = persistent_term:get(?KEY(Name)),
@@ -259,6 +266,12 @@ format_error(tls_with_http_scheme, _ST) ->
         general =>
             "tls => [...] implies https; drop scheme => http (or drop tls) "
             "instead of serving the configured certs' traffic in cleartext"
+    };
+format_error({bad_max_query_keys, Max}, _ST) ->
+    #{
+        general => io_lib:format(
+            "max_query_keys must be a non-negative integer or infinity, not ~0tp", [Max]
+        )
     };
 format_error({bad_scheme, Scheme}, _ST) ->
     #{general => io_lib:format("scheme must be http or https, not ~0tp", [Scheme])}.
@@ -325,8 +338,15 @@ stash(Routes, Opts) ->
         table => arizona_route_table:compile(Routes, BuildOpts, ?MODULE),
         ws_opts => maps:merge(?WS_OPTS, maps:get(ws_opts, Opts, #{})),
         max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH),
-        max_query_keys => maps:get(max_query_keys, Opts, ?MAX_QUERY_KEYS)
+        max_query_keys => query_key_limit(Opts)
     }.
+
+query_key_limit(#{max_query_keys := Max}) when Max =:= infinity; is_integer(Max), Max >= 0 ->
+    Max;
+query_key_limit(#{max_query_keys := Bad} = Opts) ->
+    config_error({bad_max_query_keys, Bad}, Opts);
+query_key_limit(#{}) ->
+    ?MAX_QUERY_KEYS.
 
 suspend_owned(#{owner := self}, Name) ->
     ranch:suspend_listener(Name);
