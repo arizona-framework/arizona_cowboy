@@ -22,7 +22,7 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 
 ## Options
 
-- `routes` -- the Arizona route list (required).
+- `routes` -- the Arizona route list, of `t:arizona_route:route/0` (required).
 - `transport_opts` -- `[{port, Port}]` (default `4040`); other entries go to
   Ranch's socket options.
 - `scheme` -- `http` (default) or `https`.
