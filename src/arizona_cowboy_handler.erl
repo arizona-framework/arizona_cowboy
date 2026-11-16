@@ -383,10 +383,12 @@ resolve([Component | Rest], Resolved, Links) ->
             error
     end.
 
-%% A name as a binary: a list (the asset dir, a link target the file name
-%% encoding can read) holds characters, a binary is the raw name already.
+%% A name as the raw bytes the file system holds. A binary is that already. A
+%% list (the asset dir, a link target the encoding can read) holds characters
+%% the node's file name encoding maps to bytes: one per character under latin1
+%% (`+fnl`), UTF-8 otherwise.
 name(Name) when is_binary(Name) -> Name;
-name(Name) -> unicode:characters_to_binary(Name).
+name(Name) -> unicode:characters_to_binary(Name, unicode, file:native_name_encoding()).
 
 cache_control({asset, _Path, _Source, #{cache_control := Value}}) ->
     [{~"cache-control", Value}];

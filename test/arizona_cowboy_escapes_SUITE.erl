@@ -25,6 +25,7 @@ its own.
 -export([asset_dir_whose_name_is_not_utf8_serves/1]).
 -export([asset_extension_that_is_not_utf8_is_octet_stream/1]).
 -export([asset_link_into_a_sibling_sharing_the_dir_prefix_is_404/1]).
+-export([asset_dir_list_follows_a_latin1_file_name_encoding/1]).
 -export([asset_traversal_is_refused_in_every_encoding/1]).
 -export([ws_upgrade_with_a_malformed_query_escape_opens/1]).
 -export([navigate_target_with_a_malformed_query_escape_resolves/1]).
@@ -45,6 +46,7 @@ all() ->
         asset_dir_whose_name_is_not_utf8_serves,
         asset_extension_that_is_not_utf8_is_octet_stream,
         asset_link_into_a_sibling_sharing_the_dir_prefix_is_404,
+        asset_dir_list_follows_a_latin1_file_name_encoding,
         asset_traversal_is_refused_in_every_encoding,
         ws_upgrade_with_a_malformed_query_escape_opens,
         navigate_target_with_a_malformed_query_escape_resolves
@@ -219,6 +221,33 @@ asset_extension_that_is_not_utf8_is_octet_stream(Config) ->
 
 asset_link_into_a_sibling_sharing_the_dir_prefix_is_404(Config) ->
     ?assertMatch({404, _}, request(Config, ~"GET", ~"/files/sib.txt")).
+
+%% A list names a file as the node's file name encoding reads it: under
+%% `+fnl` (latin1) each character is one byte of the name. The listener runs on
+%% a node started that way; the directory's name is `d` and the UTF-8 bytes of
+%% `é`, which that node's list spells as the two characters 195 and 169.
+asset_dir_list_follows_a_latin1_file_name_encoding(Config) ->
+    Dir = filename:join(?config(priv_dir, Config), <<"d", 195, 169>>),
+    ok = filelib:ensure_path(Dir),
+    ok = file:write_file(filename:join(Dir, "app.txt"), ~"latin1-bytes"),
+    ListDir = binary_to_list(Dir),
+    Paths = lists:append([["-pa", P] || P <- code:get_path()]),
+    {ok, Peer, _Node} = peer:start_link(#{connection => standard_io, args => ["+fnl" | Paths]}),
+    try
+        ?assertEqual(latin1, peer:call(Peer, file, native_name_encoding, [])),
+        {ok, _} = peer:call(Peer, application, ensure_all_started, [arizona]),
+        Port = pick_port(),
+        {ok, _} = peer:call(Peer, arizona_cowboy_server, start, [
+            escapes_latin1,
+            #{
+                transport_opts => [{port, Port}],
+                routes => [{asset, ~"/files", {dir, ListDir}, #{}}]
+            }
+        ]),
+        ?assertEqual({200, ~"latin1-bytes"}, request([{port, Port}], ~"GET", ~"/files/app.txt"))
+    after
+        ok = peer:stop(Peer)
+    end.
 
 %% `..`, `/`, `\` and NUL in a segment are refused however they are spelled,
 %% a byte that is not UTF-8 or a malformed escape beside them included.
