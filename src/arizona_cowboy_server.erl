@@ -47,12 +47,11 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   `_az_fps_follow`, `_az_caps`, each once); the params a page's
   `connect(endpoint, params)` call passes are query keys there and count, so a
   page served within the limit is refused its socket when they push it over. A
-  request to a live or controller
-  route, or an upgrade, with more is answered `400`, whether or not the route
-  reads its query; an asset route never counts. A live navigate or patch to such
-  a URL is not served in place (`arizona_cowboy_req:resolve_route/3` answers
-  `error`), so the client loads it over HTTP and gets the same `400`.
-  Roadrunner has no such cap.
+  request to a live or controller route, or an upgrade, with more is answered
+  `400`, whether or not the route reads its query; an asset route never counts.
+  A live navigate or patch to such a URL is not served in place
+  (`arizona_cowboy_req:resolve_route/3` answers `error`), so the client loads it
+  over HTTP and gets the same `400`. Roadrunner has no such cap.
 - `compress` -- `true` (default) compresses pages and assets
   (`arizona_route:transforms/2`).
 - `error_page` -- `{Module, Function}` template rendered on a page crash in
