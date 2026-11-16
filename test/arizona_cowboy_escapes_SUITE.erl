@@ -37,9 +37,13 @@ its own.
 -export([a_long_run_of_empty_pairs_counts_nothing/1]).
 -export([max_query_keys_infinity_counts_nothing/1]).
 -export([max_query_keys_must_be_a_count_or_infinity/1]).
+-export([a_run_of_empty_pairs_hides_no_key_after_it/1]).
+-export([a_cors_preflight_counts_its_query_keys/1]).
+-export([arizona_keys_count_everywhere_but_the_upgrade/1]).
 -export([max_query_keys_sets_the_limit/1]).
 
 -define(LISTENER, escapes).
+-define(ORIGIN, ~"https://app.example").
 -define(PARAMS, [{~"locale", ~"%G1"}, {~"x", ~"%4"}]).
 
 all() ->
@@ -67,6 +71,9 @@ all() ->
         a_long_run_of_empty_pairs_counts_nothing,
         max_query_keys_infinity_counts_nothing,
         max_query_keys_must_be_a_count_or_infinity,
+        a_run_of_empty_pairs_hides_no_key_after_it,
+        a_cors_preflight_counts_its_query_keys,
+        arizona_keys_count_everywhere_but_the_upgrade,
         max_query_keys_sets_the_limit
     ].
 
@@ -100,6 +107,12 @@ init_per_suite(Config) ->
             %% Neither reads the query.
             {live, ~"/plain", arizona_cowboy_echo_page, #{}},
             {get, ~"/hello", arizona_cowboy_smoke_controller, #{state => #{body => ~"hi"}}},
+            {post, ~"/cors", arizona_cowboy_echo_controller, #{
+                check_origin => false,
+                middlewares => [
+                    arizona_middleware:cors(#{origins => [?ORIGIN], methods => [~"POST"]})
+                ]
+            }},
             %% Mounts only when the query reaches it as ?PARAMS.
             {live, ~"/live", arizona_cowboy_echo_page, #{
                 middlewares => [
@@ -436,11 +449,59 @@ max_query_keys_must_be_a_count_or_infinity(Config) when is_list(Config) ->
             ?assertError({bad_max_query_keys, Bad}, arizona_cowboy_server:mount(escapes_bad, Opts)),
             #{general := Message} =
                 arizona_cowboy_server:format_error({bad_max_query_keys, Bad}, []),
-            ?assertNotEqual(nomatch, string:find(Message, ~"max_query_keys"))
+            ?assertEqual(
+                <<"max_query_keys must be a non-negative integer or infinity, not ",
+                    (iolist_to_binary(io_lib:format("~0tp", [Bad])))/binary>>,
+                iolist_to_binary(Message)
+            )
         end
      || Bad <- [-1, 100.0, ~"100", unlimited]
     ],
     ?assertEqual({error, not_found}, arizona_cowboy_server:stop(escapes_bad)).
+
+%% Empty pairs are skipped 64 at a time, then one by one: a key right after a run
+%% of any length is still found.
+a_run_of_empty_pairs_hides_no_key_after_it(Config) when is_list(Config) ->
+    [
+        begin
+            Qs = <<(binary:copy(~"&", N))/binary, "a">>,
+            ?assertNot(arizona_cowboy_req:within_key_limit(Qs, 0, [])),
+            ?assert(arizona_cowboy_req:within_key_limit(Qs, 1, []))
+        end
+     || N <- [1, 63, 64, 65, 127, 128, 129]
+    ].
+
+%% A preflight is a request to the route like any other.
+a_cors_preflight_counts_its_query_keys(Config) ->
+    Preflight = [{~"origin", ?ORIGIN}, {~"access-control-request-method", ~"POST"}],
+    ?assertMatch(
+        {204, _, _}, request_head(Config, ~"OPTIONS", <<"/cors?", (keys(100))/binary>>, Preflight)
+    ),
+    ?assertMatch(
+        {400, _, _}, request_head(Config, ~"OPTIONS", <<"/cors?", (keys(101))/binary>>, Preflight)
+    ).
+
+%% Only the upgrade strips Arizona's own keys; anywhere else they are the
+%% page's.
+arizona_keys_count_everywhere_but_the_upgrade(Config) ->
+    Arizona = ~"_az_path=/plain&_az_reconnect=1&_az_fps_follow=1&_az_caps=%7B%7D",
+    [
+        ?assertMatch(
+            {400, _},
+            request(Config, ~"GET", <<Path/binary, "?", Arizona/binary, "&", (keys(97))/binary>>)
+        )
+     || Path <- [~"/plain", ~"/hello"]
+    ],
+    ?assertEqual(
+        error,
+        arizona_cowboy_req:resolve_route(
+            ~"/plain", <<Arizona/binary, "&", (keys(97))/binary>>, upgrade_req(?LISTENER)
+        )
+    ),
+    ?assertMatch(
+        <<"HTTP/1.1 101 ", _/binary>>,
+        upgrade(Config, <<"/ws?", Arizona/binary, "&", (keys(100))/binary>>)
+    ).
 
 %% --------------------------------------------------------------------
 %% Helpers
@@ -492,11 +553,17 @@ request(Config, Method, Path) ->
 
 %% As `request/3`, with the head too, lowercased (bytes past ASCII kept).
 request_head(Config, Method, Path) ->
+    request_head(Config, Method, Path, []).
+
+%% As `request_head/3`, with these extra header lines.
+request_head(Config, Method, Path, Headers) ->
     Response = exchange(Config, [
         Method,
         ~" ",
         Path,
-        ~" HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: 0\r\n\r\n"
+        ~" HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\ncontent-length: 0\r\n",
+        [[Name, ~": ", Value, ~"\r\n"] || {Name, Value} <- Headers],
+        ~"\r\n"
     ]),
     [Head, Body] = binary:split(Response, ~"\r\n\r\n"),
     <<"HTTP/1.1 ", Code:3/binary, _/binary>> = Head,

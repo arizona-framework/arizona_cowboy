@@ -17,6 +17,7 @@ by `arizona_cowboy_middleware` in front of the owner's own router.
 -export([mounts_once/1]).
 -export([drain_and_stop_leave_the_owners_listener_up/1]).
 -export([options_star_passes_on_to_the_owner/1]).
+-export([query_key_limit_applies_to_mounted_routes_only/1]).
 
 -define(OWNER, mount_owner).
 
@@ -27,7 +28,8 @@ all() ->
         an_unmounted_listener_passes_everything_on,
         mounts_once,
         drain_and_stop_leave_the_owners_listener_up,
-        options_star_passes_on_to_the_owner
+        options_star_passes_on_to_the_owner,
+        query_key_limit_applies_to_mounted_routes_only
     ].
 
 init_per_suite(Config) ->
@@ -53,6 +55,9 @@ init_per_testcase(options_star_passes_on_to_the_owner, Config) ->
             {match, '*', ~"/:any", arizona_cowboy_smoke_controller, #{state => #{body => ~"hi"}}}
         ]
     }),
+    Config;
+init_per_testcase(query_key_limit_applies_to_mounted_routes_only, Config) ->
+    ok = arizona_cowboy_server:mount(?OWNER, #{routes => routes(), max_query_keys => 2}),
     Config;
 init_per_testcase(_Case, Config) ->
     ok = arizona_cowboy_server:mount(?OWNER, #{routes => routes()}),
@@ -104,6 +109,13 @@ drain_and_stop_leave_the_owners_listener_up(Config) ->
 options_star_passes_on_to_the_owner(Config) ->
     ?assertMatch({200, <<"hi">>}, request(Config, ~"OPTIONS", ~"/x")),
     ?assertMatch({404, _}, request(Config, ~"OPTIONS", ~"*")).
+
+%% The mounted routes take the limit `mount/2` was given; the owner's own routes
+%% are the owner's business.
+query_key_limit_applies_to_mounted_routes_only(Config) ->
+    ?assertMatch({200, <<"hi">>}, request(Config, ~"GET", ~"/hello?a&b")),
+    ?assertMatch({400, _}, request(Config, ~"GET", ~"/hello?a&b&c")),
+    ?assertMatch({200, <<"owner">>}, request(Config, ~"GET", ~"/owned?a&b&c")).
 
 %% --------------------------------------------------------------------
 %% Helpers
