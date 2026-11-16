@@ -19,10 +19,14 @@ by `arizona_cowboy_middleware` in front of the owner's own router.
 -export([options_star_passes_on_to_the_owner/1]).
 -export([query_key_limit_applies_to_mounted_routes_only/1]).
 -export([owner_routes_answer_while_mounting_and_unmounting/1]).
+-export([a_request_reads_the_listener_once/1]).
 -export([arizona_routes_answer_while_mounting_and_unmounting/1]).
 -export([a_navigate_on_an_unmounted_listener_is_unresolved/1]).
 
 -define(OWNER, mount_owner).
+%% Concurrent clients, and requests each, of the mount/unmount race cases.
+-define(CLIENTS, 16).
+-define(ROUNDS, 250).
 
 all() ->
     [
@@ -34,6 +38,7 @@ all() ->
         options_star_passes_on_to_the_owner,
         query_key_limit_applies_to_mounted_routes_only,
         owner_routes_answer_while_mounting_and_unmounting,
+        a_request_reads_the_listener_once,
         arizona_routes_answer_while_mounting_and_unmounting,
         a_navigate_on_an_unmounted_listener_is_unresolved
     ].
@@ -136,14 +141,14 @@ query_key_limit_applies_to_mounted_routes_only(Config) ->
 %% unmount landing while it handles a request to one of the owner's own routes
 %% is no crash, the request is passed on either way. A race, so many tries.
 owner_routes_answer_while_mounting_and_unmounting(Config) ->
-    Flipper = flipper(routes()),
-    Answers =
-        try
-            [request(Config, ~"GET", ~"/owned") || _ <- lists:seq(1, 4000)]
-        after
-            ok = stop_flipper(Flipper)
-        end,
-    ?assertEqual([], [Answer || {Status, _} = Answer <- Answers, Status =/= 200]).
+    Answers = while_flipping(routes(), Config, [{~"GET", ~"/owned"}]),
+    ?assertEqual([], [Answer || Answer <- Answers, not is_status(Answer, [200])]).
+
+%% What the race cases catch only when a request is preempted at the wrong
+%% moment, pinned on every request: whatever it reaches, a request reads what
+%% the listener serves once, so no unmount can fall between two reads.
+a_request_reads_the_listener_once(Config) ->
+    ?assertEqual([{~"/owned", 200, 1}], reads(Config, [{~"GET", ~"/owned"}])).
 
 %% A request the middleware hands to an Arizona route is served from the routes
 %% and limits it read, so an unmount landing mid-request is no crash: the
@@ -154,18 +159,8 @@ arizona_routes_answer_while_mounting_and_unmounting(Config) ->
         {post, ~"/body", arizona_cowboy_body_controller, #{state => #{prefix => ~"read "}}}
         | routes()
     ],
-    Flipper = flipper(Routes),
-    Answers =
-        try
-            [
-                request(Config, Method, Path)
-             || _ <- lists:seq(1, 2000),
-                {Method, Path} <- [{~"GET", ~"/hello"}, {~"POST", ~"/body"}]
-            ]
-        after
-            ok = stop_flipper(Flipper)
-        end,
-    ?assertEqual([], [Answer || {Status, _} = Answer <- Answers, Status =/= 200, Status =/= 404]).
+    Answers = while_flipping(Routes, Config, [{~"GET", ~"/hello"}, {~"POST", ~"/body"}]),
+    ?assertEqual([], [Answer || Answer <- Answers, not is_status(Answer, [200, 404])]).
 
 %% A live session can outlast its routes: a navigate after the unmount is left
 %% unresolved, as one to a URL no route serves, rather than crashing.
@@ -179,12 +174,83 @@ a_navigate_on_an_unmounted_listener_is_unresolved(Config) when is_list(Config) -
 %% Helpers
 %% --------------------------------------------------------------------
 
+%% The answers to `Requests`, sent over and over by many clients at once while
+%% `Routes` are mounted and unmounted in a loop that yields between its steps:
+%% the more requests in flight, the likelier one is caught between an unmount
+%% and a second read, even on a single scheduler.
+while_flipping(Routes, Config, Requests) ->
+    Flipper = flipper(Routes),
+    try
+        Self = self(),
+        Clients = [
+            spawn_link(fun() -> Self ! {answers, self(), client(Config, Requests)} end)
+         || _ <- lists:seq(1, ?CLIENTS)
+        ],
+        lists:append([
+            receive
+                {answers, Client, Answers} -> Answers
+            after 60000 -> error({client_stuck, Client})
+            end
+         || Client <- Clients
+        ])
+    after
+        ok = stop_flipper(Flipper)
+    end.
+
+client(Config, Requests) ->
+    [
+        try_request(Config, Method, Path)
+     || _ <- lists:seq(1, ?ROUNDS), {Method, Path} <- Requests
+    ].
+
+is_status({Status, _Body}, Statuses) -> lists:member(Status, Statuses);
+is_status(_NoAnswer, _Statuses) -> false.
+
+%% Each request's path, status and reads of the owner listener's routes, by
+%% every process it involves: `persistent_term` calls on its key are traced.
+reads(Config, Requests) ->
+    Key = {arizona_cowboy_server, ?OWNER},
+    MatchSpec = [{[Key], [], []}, {[Key, '_'], [], []}],
+    Patterned = erlang:trace_pattern({persistent_term, get, '_'}, MatchSpec, [local]),
+    true = Patterned > 0,
+    0 = erlang:trace(new_processes, true, [call, {tracer, self()}]),
+    try
+        [
+            begin
+                {Status, _Body} = request(Config, Method, Path),
+                {Path, Status, length(delivered_reads(Key))}
+            end
+         || {Method, Path} <- Requests
+        ]
+    after
+        erlang:trace(new_processes, false, [call]),
+        erlang:trace_pattern({persistent_term, get, '_'}, false, [local]),
+        delivered_reads(Key)
+    end.
+
+%% The traced reads of `Key` so far, every one of them delivered.
+delivered_reads(Key) ->
+    Ref = erlang:trace_delivered(all),
+    receive
+        {trace_delivered, all, Ref} -> ok
+    after 5000 -> error(trace_not_delivered)
+    end,
+    collect_reads(Key).
+
+collect_reads(Key) ->
+    receive
+        {trace, _Pid, call, {persistent_term, get, [Key | _]}} = Read -> [Read | collect_reads(Key)]
+    after 0 -> []
+    end.
+
 %% Mounts `Routes` on the owner's listener and unmounts them, over and over,
 %% until `stop_flipper/1`.
 flipper(Routes) ->
     spawn_link(fun Flip() ->
         ok = arizona_cowboy_server:mount(?OWNER, #{routes => Routes}),
+        erlang:yield(),
         ok = arizona_cowboy_server:unmount(?OWNER),
+        erlang:yield(),
         receive
             stop -> ok
         after 0 -> Flip()
@@ -248,6 +314,15 @@ request(Config, Method, Path) ->
     [Head, Body] = binary:split(Response, ~"\r\n\r\n"),
     <<"HTTP/1.1 ", Code:3/binary, _/binary>> = Head,
     {binary_to_integer(Code), Body}.
+
+%% As `request/3`, but a request whose connection fails or goes unanswered is
+%% that outcome rather than a crash, so a race test reports every miss at once.
+try_request(Config, Method, Path) ->
+    try
+        request(Config, Method, Path)
+    catch
+        error:Reason -> {no_answer, Reason}
+    end.
 
 recv_all(Sock, Acc) ->
     case gen_tcp:recv(Sock, 0, 5000) of
