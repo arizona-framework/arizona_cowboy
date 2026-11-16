@@ -44,7 +44,10 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   other value is refused when the listener starts or mounts
   (`bad_max_query_keys`). Empty pairs are no keys, and on a WebSocket upgrade
   neither are the ones Arizona's client adds (`_az_path`, `_az_reconnect`,
-  `_az_fps_follow`, `_az_caps`, each once). A request to a live or controller
+  `_az_fps_follow`, `_az_caps`, each once); the params a page's
+  `connect(endpoint, params)` call passes are query keys there and count, so a
+  page served within the limit is refused its socket when they push it over. A
+  request to a live or controller
   route, or an upgrade, with more is answered `400`, whether or not the route
   reads its query; an asset route never counts. A live navigate or patch to such
   a URL is not served in place (`arizona_cowboy_req:resolve_route/3` answers

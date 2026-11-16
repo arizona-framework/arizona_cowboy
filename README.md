@@ -79,7 +79,10 @@ route matches reaches the router as before.
 A query string may hold at most `max_query_keys` keys (default `100`, the limit
 Cowboy's own parser applies; `infinity` for none). The keys are counted once,
 before anything reads the query: empty pairs are not keys, and on the WebSocket
-upgrade neither are the ones Arizona's client adds (`_az_path` and the like). A
+upgrade neither are the ones Arizona's client adds (`_az_path` and the like),
+though the params a page passes to `connect(endpoint, params)` are: they ride
+the upgrade's query too, so they can push a page served within the limit over
+it on its socket. A
 request to a live or controller route, or an upgrade, with more is answered
 `400`, whether or not the route reads its query; asset routes never count. A
 live navigate or patch to such a URL is not served in place but becomes a full

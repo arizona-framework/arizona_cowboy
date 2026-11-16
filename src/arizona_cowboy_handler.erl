@@ -157,10 +157,12 @@ websocket_info(Msg, #{socket := Sock} = State) ->
 %% Counted once, eagerly, before anything parses the query: a route that never
 %% reads it refuses one over the listener's `max_query_keys` as one that does,
 %% and a navigate (`arizona_cowboy_req:resolve_route/3`) applies the same rule.
-%% An asset never reads its query. An upgrade's query is the page's plus the
-%% keys Arizona's client adds, which `arizona_ws` strips before the page sees
-%% it, so those count for none (each once): a page served within the limit can
-%% open its socket and reconnect.
+%% An asset never reads its query. An upgrade's query is the page's, the extra
+%% params the page's `connect(endpoint, params)` call passes, and the keys
+%% Arizona's client adds, which `arizona_ws` strips before the page sees it.
+%% Only those last count for none (each once): the server cannot tell connect
+%% params from page keys, so they count, and a page served within the limit is
+%% refused its socket when its connect params push it over.
 within_key_limit(#{kind := asset}, _Req, _Listener) ->
     true;
 within_key_limit(#{kind := Kind}, Req, Listener) ->
