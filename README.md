@@ -70,8 +70,11 @@ Cowboy's own router and query parser do:
 - In the query string `+` is a space; in a path it stays a `+`.
 
 `arizona_cowboy_middleware` heads the listener's middleware chain, so Arizona's
-route matcher sees each path before Cowboy's router does; a path no Arizona
-route matches reaches the router as before.
+route matcher sees each path before Cowboy's router does. A path no Arizona
+route matches is answered `404`, one holding a malformed escape too
+(`/nowhere/%G1`), as on Arizona's other adapters. On a listener whose
+`proto_opts` names its own `middlewares` or `env`, and on one another framework
+owns, such a path continues down the chain instead, to the routes behind it.
 
 A query string may hold at most `max_query_keys` keys (default `100`, the limit
 Cowboy's own parser applies; `infinity` for none). The keys are counted once,

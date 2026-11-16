@@ -17,8 +17,11 @@ its own.
 -export([path_with_a_malformed_escape_keeps_its_segment_raw/1]).
 -export([query_with_a_malformed_escape_keeps_it_raw/1]).
 -export([parse_qs_reads_form_encoding_leniently/1]).
--export([paths_no_route_matches_keep_the_routers_answers/1]).
+-export([paths_no_route_matches_are_404/1]).
 -export([options_star_is_no_arizona_path/1]).
+-export([misses_reach_routes_given_in_proto_opts/1]).
+-export([misses_reach_a_dispatch_given_alone_in_proto_opts/1]).
+-export([misses_reach_middlewares_given_alone_in_proto_opts/1]).
 -export([asset_missing_non_utf8_file_is_404/1]).
 -export([asset_non_utf8_file_is_served/1]).
 -export([asset_link_to_a_non_utf8_name_is_followed_inside_only/1]).
@@ -52,8 +55,11 @@ all() ->
         path_with_a_malformed_escape_keeps_its_segment_raw,
         query_with_a_malformed_escape_keeps_it_raw,
         parse_qs_reads_form_encoding_leniently,
-        paths_no_route_matches_keep_the_routers_answers,
+        paths_no_route_matches_are_404,
         options_star_is_no_arizona_path,
+        misses_reach_routes_given_in_proto_opts,
+        misses_reach_a_dispatch_given_alone_in_proto_opts,
+        misses_reach_middlewares_given_alone_in_proto_opts,
         asset_missing_non_utf8_file_is_404,
         asset_non_utf8_file_is_served,
         asset_link_to_a_non_utf8_name_is_followed_inside_only,
@@ -200,12 +206,81 @@ parse_qs_reads_form_encoding_leniently(Config) when is_list(Config) ->
         )
     ).
 
-%% A path no Arizona route matches still reaches Cowboy's router, which answers
-%% it as before: `404`, or `400` for a path it cannot parse.
-paths_no_route_matches_keep_the_routers_answers(Config) ->
-    ?assertMatch({404, _}, request(Config, ~"GET", ~"/nope")),
-    ?assertMatch({400, _}, request(Config, ~"GET", ~"/nope/%G1")),
+%% A path no Arizona route matches is `404`, one holding a malformed escape too:
+%% it is a path to match, as on any adapter, not one Cowboy's router refuses.
+paths_no_route_matches_are_404(Config) ->
+    [
+        ?assertMatch({404, _}, request(Config, Method, Path))
+     || Method <- [~"GET", ~"HEAD", ~"POST", ~"OPTIONS"],
+        Path <- [~"/nope", ~"/nope/%G1", ~"/nowhere/%G1", ~"/items/%G1/extra", ~"/nope/%4"]
+    ],
     ?assertMatch({405, _}, request(Config, ~"POST", ~"/items/%G1")).
+
+%% A listener whose `proto_opts` names its own router keeps the routes behind
+%% the middleware: a path no Arizona route matches reaches them, and their
+%% router answers what they do not serve.
+misses_reach_routes_given_in_proto_opts(Config) when is_list(Config) ->
+    Port = pick_port(),
+    Dispatch = cowboy_router:compile([{'_', [{"/owned", arizona_cowboy_owner_handler, []}]}]),
+    {ok, _} = arizona_cowboy_server:start(escapes_owned, #{
+        transport_opts => [{port, Port}],
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}],
+        proto_opts => #{
+            middlewares => [arizona_cowboy_middleware, cowboy_router, cowboy_handler],
+            env => #{dispatch => Dispatch}
+        }
+    }),
+    try
+        ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q")),
+        ?assertEqual({200, ~"owner"}, request([{port, Port}], ~"GET", ~"/owned")),
+        ?assertMatch({404, _}, request([{port, Port}], ~"GET", ~"/nope")),
+        ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/nope/%G1"))
+    after
+        ok = arizona_cowboy_server:stop(escapes_owned)
+    end.
+
+%% An `env` alone names the router's dispatch behind the adapter's default
+%% middlewares: its routes are served, and a miss is left to that router.
+misses_reach_a_dispatch_given_alone_in_proto_opts(Config) when is_list(Config) ->
+    Port = pick_port(),
+    Dispatch = cowboy_router:compile([{'_', [{"/owned", arizona_cowboy_owner_handler, []}]}]),
+    {ok, _} = arizona_cowboy_server:start(escapes_env_only, #{
+        transport_opts => [{port, Port}],
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}],
+        proto_opts => #{env => #{dispatch => Dispatch}}
+    }),
+    try
+        ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q")),
+        ?assertEqual({200, ~"owner"}, request([{port, Port}], ~"GET", ~"/owned")),
+        ?assertMatch({404, _}, request([{port, Port}], ~"GET", ~"/nope")),
+        ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/nope/%G1"))
+    after
+        ok = arizona_cowboy_server:stop(escapes_env_only)
+    end.
+
+%% `middlewares` alone may put the owner's own middleware behind Arizona's, in
+%% front of the adapter's dispatch: a miss reaches it.
+misses_reach_middlewares_given_alone_in_proto_opts(Config) when is_list(Config) ->
+    Port = pick_port(),
+    {ok, _} = arizona_cowboy_server:start(escapes_middlewares_only, #{
+        transport_opts => [{port, Port}],
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}],
+        proto_opts => #{
+            middlewares => [
+                arizona_cowboy_middleware,
+                arizona_cowboy_health_middleware,
+                cowboy_router,
+                cowboy_handler
+            ]
+        }
+    }),
+    try
+        ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q")),
+        ?assertEqual({200, ~"healthy"}, request([{port, Port}], ~"GET", ~"/health")),
+        ?assertMatch({404, _}, request([{port, Port}], ~"GET", ~"/nope"))
+    after
+        ok = arizona_cowboy_server:stop(escapes_middlewares_only)
+    end.
 
 %% `OPTIONS *` addresses the server, not a resource: a route whose pattern would
 %% match a `*` segment does not answer it.

@@ -1,9 +1,19 @@
 -module(arizona_cowboy_handler).
 -moduledoc """
-The Cowboy adapter's single handler: a request reaches it through
-`arizona_cowboy_middleware` (a path an Arizona route matches) or, on a listener
-this adapter started, the router's catch-all route (any other path, answered
-`404`), and it routes with `arizona_route_table`.
+The Cowboy adapter's single handler, which routes with `arizona_route_table`. A
+request reaches it in one of two ways:
+
+- Through `arizona_cowboy_middleware`, along with the listener's routes the
+  middleware read: a path an Arizona route matches, and, on a listener this
+  adapter started with its default chain, any other path, answered `404`.
+- Through a Cowboy router's route to it, which names only the listener, whose
+  routes the handler then reads itself: the catch-all route of a listener this
+  adapter started whose `proto_opts` replaces its `middlewares`, or an owner's
+  own route to it. A path no Arizona route serves is answered `404`, and so is
+  every path while nothing is mounted. When those `middlewares` leave
+  `arizona_cowboy_middleware` out, every request, Arizona's routes included,
+  comes this way, so Cowboy's router answers a path holding a malformed escape
+  `400` before the handler sees it.
 
 What each route kind answers comes from core -- `arizona_http:reply/3` for a
 page, `arizona_ws:upgrade/3` for a WebSocket, `arizona_controller:dispatch/3`
@@ -44,39 +54,27 @@ route's response transforms (`arizona_http_transforms`). It is also the
 %% API Functions
 %% --------------------------------------------------------------------
 
--doc "Cowboy `init/2`: routes the request and answers it.".
--spec init(Req, Listener) -> Result when
+-doc """
+Cowboy `init/2`: routes the request and answers it. `arizona_cowboy_middleware`
+hands over the listener it read along with its name; the router's catch-all
+route only the name, and the listener is read here.
+""".
+-spec init(Req, Opts) -> Result when
     Req :: cowboy_req:req(),
-    Listener :: atom(),
+    Opts :: Name | {Name, arizona_cowboy_server:listener()},
+    Name :: atom(),
     Result ::
-        {ok, Req, Listener}
+        {ok, Req, Name}
         | {cowboy_loop, Req, map()}
         | {cowboy_websocket, Req, map(), map()}.
-init(Req, Listener) ->
-    %% Counted in flight until this process exits, so a drain waits for it.
-    ok = arizona_pubsub:subscribe(arizona_cowboy_server:requests(Listener), self()),
-    Table = arizona_cowboy_server:table(Listener),
-    case arizona_route_table:match(cowboy_req:method(Req), cowboy_req:path(Req), Table) of
-        not_found ->
-            {ok, reply({404, [], <<>>}, Req), Listener};
-        {method_not_allowed, Allow} ->
-            {ok, reply({405, [{~"allow", join(Allow)}], <<>>}, Req), Listener};
-        {ok, #{transforms := Transforms} = Entry, Bindings} ->
-            Req1 = Req#{bindings => Bindings},
-            case within_key_limit(Entry, Req1, Listener) of
-                false ->
-                    %% What Cowboy's own query parser has answered.
-                    {ok, reply({400, [], <<>>}, Req1), Listener};
-                true ->
-                    case
-                        arizona_http_transforms:preflight(
-                            Transforms, cowboy_req:method(Req1), cowboy_req:headers(Req1)
-                        )
-                    of
-                        none -> serve(Entry, Req1, Listener);
-                        Preflight -> {ok, reply(Preflight, Req1), Listener}
-                    end
-            end
+init(Req, {Name, Stash}) ->
+    init(Req, Name, Stash);
+init(Req, Name) ->
+    case arizona_cowboy_server:find_listener(Name) of
+        {ok, Stash} ->
+            init(Req, Name, Stash);
+        error ->
+            {ok, reply({404, [], <<>>}, Req), Name}
     end.
 
 -doc "Cowboy `cowboy_loop` `info/3`: hands a message to the controller's loop.".
@@ -154,6 +152,34 @@ websocket_info(Msg, #{socket := Sock} = State) ->
 %% Internal functions
 %% --------------------------------------------------------------------
 
+%% Served wholly from `Stash`, one read of the listener's routes and limits:
+%% an unmount landing mid-request leaves it what it started with.
+init(Req, Name, #{table := Table} = Stash) ->
+    %% Counted in flight until this process exits, so a drain waits for it.
+    ok = arizona_pubsub:subscribe(arizona_cowboy_server:requests(Name), self()),
+    case arizona_route_table:match(cowboy_req:method(Req), cowboy_req:path(Req), Table) of
+        not_found ->
+            {ok, reply({404, [], <<>>}, Req), Name};
+        {method_not_allowed, Allow} ->
+            {ok, reply({405, [{~"allow", join(Allow)}], <<>>}, Req), Name};
+        {ok, #{transforms := Transforms} = Entry, Bindings} ->
+            Req1 = arizona_cowboy_req:with_limits(Req#{bindings => Bindings}, Stash),
+            case within_key_limit(Entry, Req1, Stash) of
+                false ->
+                    %% What Cowboy's own query parser has answered.
+                    {ok, reply({400, [], <<>>}, Req1), Name};
+                true ->
+                    case
+                        arizona_http_transforms:preflight(
+                            Transforms, cowboy_req:method(Req1), cowboy_req:headers(Req1)
+                        )
+                    of
+                        none -> serve(Entry, Req1, Name, Stash);
+                        Preflight -> {ok, reply(Preflight, Req1), Name}
+                    end
+            end
+    end.
+
 %% Counted once, eagerly, before anything parses the query: a route that never
 %% reads it refuses one over the listener's `max_query_keys` as one that does,
 %% and a navigate (`arizona_cowboy_req:resolve_route/3`) applies the same rule.
@@ -163,38 +189,40 @@ websocket_info(Msg, #{socket := Sock} = State) ->
 %% Only those last count for none (each once): the server cannot tell connect
 %% params from page keys, so they count, and a page served within the limit is
 %% refused its socket when its connect params push it over.
-within_key_limit(#{kind := asset}, _Req, _Listener) ->
+within_key_limit(#{kind := asset}, _Req, _Stash) ->
     true;
-within_key_limit(#{kind := Kind}, Req, Listener) ->
+within_key_limit(#{kind := Kind}, Req, #{max_query_keys := MaxKeys}) ->
     Uncounted =
         case Kind of
             ws -> [~"_az_path", ~"_az_reconnect", ~"_az_fps_follow", ~"_az_caps"];
             _Other -> []
         end,
     arizona_cowboy_req:within_key_limit(
-        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener), Uncounted
+        cowboy_req:qs(Req), MaxKeys, Uncounted
     ).
 
 %% A plain OPTIONS reaches a route only when it was opened for a CORS
 %% preflight; it answers with the URL's Allow set, never the route.
-serve(#{cors_options := true} = Entry, #{method := ~"OPTIONS"} = Req, Listener) ->
-    Allow = arizona_route_table:allow(
-        cowboy_req:path(Req), arizona_cowboy_server:table(Listener)
-    ),
+serve(
+    #{cors_options := true} = Entry, #{method := ~"OPTIONS"} = Req, Listener, #{table := Table}
+) ->
+    Allow = arizona_route_table:allow(cowboy_req:path(Req), Table),
     finish(Entry, Req, {204, [{~"allow", join(Allow)} || Allow =/= []], <<>>}, Listener);
-serve(#{kind := live, target := #{handler := Handler} = Live} = Entry, Req, Listener) ->
+serve(#{kind := live, target := #{handler := Handler} = Live} = Entry, Req, Listener, _Stash) ->
     {Status, Headers, Body, ArzReq} = arizona_http:reply(
         Handler, arizona_cowboy_req:new(Req), Live
     ),
     finish(Entry, arizona_req:raw(ArzReq), {Status, Headers, Body}, Listener);
-serve(#{kind := Kind, target := #{handler := Handler} = Controller} = Entry, Req, Listener) when
+serve(
+    #{kind := Kind, target := #{handler := Handler} = Controller} = Entry, Req, Listener, _Stash
+) when
     Kind =:= controller; Kind =:= mcp; Kind =:= reload
 ->
     {Reply, ArzReq} = arizona_controller:dispatch(
         Controller, arizona_cowboy_req:new(Req), arizona_cowboy_server
     ),
     controller_reply(Entry, Handler, Reply, arizona_req:raw(ArzReq), Listener);
-serve(#{kind := ws}, Req, Listener) ->
+serve(#{kind := ws}, Req, Listener, #{ws_opts := WsOpts}) ->
     case
         arizona_ws:upgrade(arizona_cowboy_req:parse_qs(cowboy_req:qs(Req)), arizona_cowboy_req, Req)
     of
@@ -203,10 +231,9 @@ serve(#{kind := ws}, Req, Listener) ->
         {upgrade, Headers, WsState} ->
             {Cookies, Others} = split_cookies(Headers),
             Req1 = cowboy_req:set_resp_headers(header_map(Others), with_cookies(Cookies, Req)),
-            {cowboy_websocket, Req1, #{listener => Listener, ws => WsState},
-                arizona_cowboy_server:ws_opts(Listener)}
+            {cowboy_websocket, Req1, #{listener => Listener, ws => WsState}, WsOpts}
     end;
-serve(#{kind := asset, route := Route, target := Dir} = Entry, Req, Listener) ->
+serve(#{kind := asset, route := Route, target := Dir} = Entry, Req, Listener, _Stash) ->
     Segments = maps:get(~"path", cowboy_req:bindings(Req), []),
     case asset_file(Dir, Segments) of
         undefined -> finish(Entry, Req, {404, [], <<>>}, Listener);

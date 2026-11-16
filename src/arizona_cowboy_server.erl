@@ -4,14 +4,17 @@ The Cowboy `arizona_server` adapter: boots a Cowboy listener serving Arizona
 routes.
 
 The Arizona routes are compiled by `arizona_route_table` into a table kept per
-listener in a `persistent_term`, which the handler and
-`arizona_cowboy_req:resolve_route/3` read. The listener's middleware chain is
-`arizona_cowboy_middleware`, then Cowboy's router with one catch-all route to
-`arizona_cowboy_handler`, then `cowboy_handler`: Arizona's matcher sees every
-path first, as on a mounted listener, so a path Cowboy's router would refuse
-(a malformed escape) is still matched; the rest reach the router as before,
-which answers what Arizona does not serve (`404`, or `400` for a path it cannot
-parse).
+listener in a `persistent_term` beside its limits (`find_listener/1`), read once
+per request, by `arizona_cowboy_middleware`, which hands it to the handler, and
+once per navigate, by `arizona_cowboy_req:resolve_route/3`. The listener's
+middleware chain is `arizona_cowboy_middleware`, then Cowboy's router with one
+catch-all route to `arizona_cowboy_handler`, then `cowboy_handler`: Arizona's
+matcher sees every path first, as on a mounted listener, so a path Cowboy's
+router would refuse (a malformed escape) is still matched, and one no Arizona
+route matches is answered `404` there, a malformed escape included, since the
+router holds nothing else. A `proto_opts` naming its own `middlewares` or `env`
+may put other routes behind it, so on such a listener a miss reaches the router
+as on a mounted one.
 
 ## Mounting on a listener another framework owns
 
@@ -77,15 +80,11 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -export([stop/1]).
 -export([mount/2]).
 -export([unmount/1]).
--export([find_table/1]).
+-export([find_listener/1]).
 -export([drain/2]).
 -export([notify_drain/2]).
 -export([recompile_routes/0]).
 -export([capabilities/0]).
--export([table/1]).
--export([ws_opts/1]).
--export([max_content_length/1]).
--export([max_query_keys/1]).
 -export([format_error/2]).
 
 %% --------------------------------------------------------------------
@@ -96,6 +95,21 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -ignore_xref([format_error/2]).
 -export([sessions/1]).
 -export([requests/1]).
+
+%% --------------------------------------------------------------------
+%% Types
+%% --------------------------------------------------------------------
+
+-export_type([listener/0]).
+
+-type listener() :: #{
+    table := arizona_route_table:table(),
+    answers_misses := boolean(),
+    max_query_keys := non_neg_integer() | infinity,
+    max_content_length := non_neg_integer(),
+    ws_opts := map(),
+    _ => term()
+}.
 
 %% --------------------------------------------------------------------
 %% Macros
@@ -122,7 +136,9 @@ mount(Ref, Opts0) ->
     case persistent_term:get(?KEY(Ref), undefined) of
         undefined ->
             #{routes := Routes} = Opts = arizona_config:resolve(Opts0),
-            persistent_term:put(?KEY(Ref), (stash(Routes, Opts))#{owner => other}),
+            persistent_term:put(
+                ?KEY(Ref), (stash(Routes, Opts))#{owner => other, answers_misses => false}
+            ),
             arizona_server_registry:listener_up(?MODULE, Ref, Routes);
         _Serving ->
             {error, {already_started, Ref}}
@@ -219,42 +235,23 @@ recompile_routes() ->
 capabilities() ->
     #{routes => [mcp, reload], replies => [stream, sendfile, loop]}.
 
--doc "The compiled route table of the listener `Name`.".
--spec table(Name) -> arizona_route_table:table() when
-    Name :: atom().
-table(Name) ->
-    #{table := Table} = persistent_term:get(?KEY(Name)),
-    Table.
-
--doc "The `cowboy_websocket` options of the listener `Name`'s live sessions.".
--spec ws_opts(Name) -> map() when
-    Name :: atom().
-ws_opts(Name) ->
-    #{ws_opts := WsOpts} = persistent_term:get(?KEY(Name)),
-    WsOpts.
-
--doc "The compiled route table of the listener `Ref`, if it serves Arizona routes.".
--spec find_table(Ref) -> {ok, arizona_route_table:table()} | error when
+-doc """
+What a request on the listener `Ref` reads, if it serves Arizona routes: its
+compiled routes (`table`), its limits (`max_query_keys`, `max_content_length`),
+its live sessions' `cowboy_websocket` options (`ws_opts`), and whether it answers
+a path no Arizona route matches itself (`answers_misses`): true for one `start/2`
+started with the adapter's default chain, whose router holds nothing else; false
+for a mounted listener, and for one whose `proto_opts` names its own
+`middlewares` or `env`, where other routes may lie behind. One read: a request
+served from it is never caught between an unmount and a second one.
+""".
+-spec find_listener(Ref) -> {ok, listener()} | error when
     Ref :: atom().
-find_table(Ref) ->
+find_listener(Ref) ->
     case persistent_term:get(?KEY(Ref), undefined) of
-        #{table := Table} -> {ok, Table};
+        #{table := _} = Listener -> {ok, Listener};
         undefined -> error
     end.
-
--doc "The largest request body the listener `Name` lets a controller read.".
--spec max_content_length(Name) -> non_neg_integer() when
-    Name :: atom().
-max_content_length(Name) ->
-    #{max_content_length := Max} = persistent_term:get(?KEY(Name)),
-    Max.
-
--doc "The most keys a query string may hold on the listener `Name`.".
--spec max_query_keys(Name) -> non_neg_integer() | infinity when
-    Name :: atom().
-max_query_keys(Name) ->
-    #{max_query_keys := Max} = persistent_term:get(?KEY(Name)),
-    Max.
 
 -doc "Renders this module's configuration errors.".
 -spec format_error(Reason, Stacktrace) -> ErrorInfo when
@@ -301,7 +298,14 @@ start_new(Name, #{routes := Routes} = Opts) ->
     Tls = tls(Opts),
     Stash = stash(Routes, Opts),
     {ok, _} = application:ensure_all_started(cowboy),
-    persistent_term:put(?KEY(Name), Stash#{owner => self}),
+    UserProtoOpts = maps:get(proto_opts, Opts, #{}),
+    %% With the adapter's default chain, the router behind the middleware holds
+    %% only the catch-all to the handler, so the middleware answers every miss
+    %% itself rather than leave Cowboy's router to refuse a path it cannot parse.
+    DefaultChain =
+        not is_map_key(middlewares, UserProtoOpts) andalso
+            not is_map_key(env, UserProtoOpts),
+    persistent_term:put(?KEY(Name), Stash#{owner => self, answers_misses => DefaultChain}),
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
     ProtoOpts = maps:merge(
         #{
@@ -309,7 +313,7 @@ start_new(Name, #{routes := Routes} = Opts) ->
             env => #{dispatch => Dispatch},
             enable_connect_protocol => true
         },
-        maps:get(proto_opts, Opts, #{})
+        UserProtoOpts
     ),
     case start_listener(Name, Tls, transport_opts(Opts), ProtoOpts) of
         {ok, _Pid} = Ok ->
@@ -321,7 +325,8 @@ start_new(Name, #{routes := Routes} = Opts) ->
     end.
 
 stop_listener(Name) ->
-    %% The listener goes first: a request still in flight reads the table.
+    %% The listener goes first, so no request arrives to find its routes gone
+    %% and be answered `404` while it is still accepting.
     Result = cowboy:stop_listener(Name),
     persistent_term:erase(?KEY(Name)),
     ok = arizona_server_registry:listener_down(Name),
