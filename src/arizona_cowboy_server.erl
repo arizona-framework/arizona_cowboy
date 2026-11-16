@@ -9,9 +9,11 @@ listener in a `persistent_term`, which the handler and
 `arizona_cowboy_middleware`, then Cowboy's router with one catch-all route to
 `arizona_cowboy_handler`, then `cowboy_handler`: Arizona's matcher sees every
 path first, as on a mounted listener, so a path Cowboy's router would refuse
-(a malformed escape) is still matched; the rest reach the router as before,
-which answers what Arizona does not serve (`404`, or `400` for a path it cannot
-parse).
+(a malformed escape) is still matched, and one no Arizona route matches is
+answered `404` there, a malformed escape included, since the router holds
+nothing else. A `proto_opts` naming its own `middlewares` or `env` may put other
+routes behind it, so on such a listener a miss reaches the router as on a
+mounted one.
 
 ## Mounting on a listener another framework owns
 
@@ -78,6 +80,7 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -export([mount/2]).
 -export([unmount/1]).
 -export([find_table/1]).
+-export([answers_misses/1]).
 -export([drain/2]).
 -export([notify_drain/2]).
 -export([recompile_routes/0]).
@@ -122,7 +125,9 @@ mount(Ref, Opts0) ->
     case persistent_term:get(?KEY(Ref), undefined) of
         undefined ->
             #{routes := Routes} = Opts = arizona_config:resolve(Opts0),
-            persistent_term:put(?KEY(Ref), (stash(Routes, Opts))#{owner => other}),
+            persistent_term:put(
+                ?KEY(Ref), (stash(Routes, Opts))#{owner => other, answers_misses => false}
+            ),
             arizona_server_registry:listener_up(?MODULE, Ref, Routes);
         _Serving ->
             {error, {already_started, Ref}}
@@ -242,6 +247,18 @@ find_table(Ref) ->
         undefined -> error
     end.
 
+-doc """
+Whether the listener `Ref` answers a path no Arizona route matches itself: true
+for one `start/2` started with its own middleware chain, whose router holds
+nothing else; false for a mounted listener, and for one whose `proto_opts`
+names its own `middlewares` or `env`, where other routes may lie behind.
+""".
+-spec answers_misses(Ref) -> boolean() when
+    Ref :: atom().
+answers_misses(Ref) ->
+    #{answers_misses := Answers} = persistent_term:get(?KEY(Ref)),
+    Answers.
+
 -doc "The largest request body the listener `Name` lets a controller read.".
 -spec max_content_length(Name) -> non_neg_integer() when
     Name :: atom().
@@ -301,7 +318,14 @@ start_new(Name, #{routes := Routes} = Opts) ->
     Tls = tls(Opts),
     Stash = stash(Routes, Opts),
     {ok, _} = application:ensure_all_started(cowboy),
-    persistent_term:put(?KEY(Name), Stash#{owner => self}),
+    UserProtoOpts = maps:get(proto_opts, Opts, #{}),
+    %% With the adapter's own chain, the router behind the middleware holds only
+    %% the catch-all to the handler, so the middleware answers every miss itself
+    %% rather than leave Cowboy's router to refuse a path it cannot parse.
+    OwnChain =
+        not is_map_key(middlewares, UserProtoOpts) andalso
+            not is_map_key(env, UserProtoOpts),
+    persistent_term:put(?KEY(Name), Stash#{owner => self, answers_misses => OwnChain}),
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
     ProtoOpts = maps:merge(
         #{
@@ -309,7 +333,7 @@ start_new(Name, #{routes := Routes} = Opts) ->
             env => #{dispatch => Dispatch},
             enable_connect_protocol => true
         },
-        maps:get(proto_opts, Opts, #{})
+        UserProtoOpts
     ),
     case start_listener(Name, Tls, transport_opts(Opts), ProtoOpts) of
         {ok, _Pid} = Ok ->

@@ -8,7 +8,9 @@ chain it heads too.
 Place it before the owner's router in the listener's `middlewares`. A request
 whose path an Arizona route matches is answered by `arizona_cowboy_handler`,
 exactly as on a listener this adapter started, and the rest of the chain does
-not run; any other request continues down the chain untouched. A path Arizona
+not run; any other request continues down the chain untouched (on a listener
+`arizona_cowboy_server:start/2` started with its own chain, the handler answers
+it `404` instead, as its router holds nothing else). A path Arizona
 serves owns its methods too: a method no Arizona route allows there is answered
 `405` here rather than passed on.
 
@@ -46,7 +48,7 @@ execute(#{ref := Ref, path := <<$/, _/binary>>} = Req, Env) ->
     case arizona_cowboy_server:find_table(Ref) of
         {ok, Table} ->
             case arizona_route_table:match(cowboy_req:method(Req), cowboy_req:path(Req), Table) of
-                not_found -> {ok, Req, Env};
+                not_found -> miss(Req, Env, Ref);
                 _ArizonaPath -> serve(Req, Env, Ref)
             end;
         error ->
@@ -58,6 +60,15 @@ execute(Req, Env) ->
 %% --------------------------------------------------------------------
 %% Internal functions
 %% --------------------------------------------------------------------
+
+%% A listener whose router holds only the catch-all to the handler has the
+%% handler answer `404` here, so Cowboy's router never refuses a path it cannot
+%% parse (`400`); anywhere else the owner's chain may serve it.
+miss(Req, Env, Ref) ->
+    case arizona_cowboy_server:answers_misses(Ref) of
+        true -> serve(Req, Env, Ref);
+        false -> {ok, Req, Env}
+    end.
 
 %% `cowboy_handler` runs the handler and the loop or WebSocket it upgrades to;
 %% the request is answered then, so the owner's chain must not run after it.
