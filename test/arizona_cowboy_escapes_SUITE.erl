@@ -24,6 +24,7 @@ its own.
 -export([asset_link_to_a_non_utf8_name_is_followed_inside_only/1]).
 -export([asset_dir_whose_name_is_not_utf8_serves/1]).
 -export([asset_extension_that_is_not_utf8_is_octet_stream/1]).
+-export([asset_link_into_a_sibling_sharing_the_dir_prefix_is_404/1]).
 -export([asset_traversal_is_refused_in_every_encoding/1]).
 -export([ws_upgrade_with_a_malformed_query_escape_opens/1]).
 -export([navigate_target_with_a_malformed_query_escape_resolves/1]).
@@ -43,6 +44,7 @@ all() ->
         asset_link_to_a_non_utf8_name_is_followed_inside_only,
         asset_dir_whose_name_is_not_utf8_serves,
         asset_extension_that_is_not_utf8_is_octet_stream,
+        asset_link_into_a_sibling_sharing_the_dir_prefix_is_404,
         asset_traversal_is_refused_in_every_encoding,
         ws_upgrade_with_a_malformed_query_escape_opens,
         navigate_target_with_a_malformed_query_escape_resolves
@@ -63,6 +65,11 @@ init_per_suite(Config) ->
     %% Links whose targets are not UTF-8: one inside the dir, one beyond it.
     ok = file:make_symlink(<<"f", 255, ".txt">>, filename:join(Dir, "inner.txt")),
     ok = file:make_symlink(<<"../s", 255>>, filename:join(Dir, "outer.txt")),
+    %% A sibling whose name starts with the asset dir's: `assets2` is not inside
+    %% `assets`, though its path has that prefix.
+    ok = filelib:ensure_path(filename:join(Priv, "assets2")),
+    ok = file:write_file(filename:join([Priv, "assets2", "secret.txt"]), ~"top-secret-bytes"),
+    ok = file:make_symlink("../assets2/secret.txt", filename:join(Dir, "sib.txt")),
     Port = pick_port(),
     {ok, _} = arizona_cowboy_server:start(?LISTENER, #{
         transport_opts => [{port, Port}],
@@ -209,6 +216,9 @@ asset_extension_that_is_not_utf8_is_octet_stream(Config) ->
     ?assertNotEqual(nomatch, binary:match(Head, ~"content-type: application/octet-stream")),
     {200, Upper, ~"upper-bytes"} = request_head(Config, ~"GET", ~"/files/upper.TXT"),
     ?assertNotEqual(nomatch, binary:match(Upper, ~"content-type: text/plain")).
+
+asset_link_into_a_sibling_sharing_the_dir_prefix_is_404(Config) ->
+    ?assertMatch({404, _}, request(Config, ~"GET", ~"/files/sib.txt")).
 
 %% `..`, `/`, `\` and NUL in a segment are refused however they are spelled,
 %% a byte that is not UTF-8 or a malformed escape beside them included.
