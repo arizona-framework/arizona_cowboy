@@ -20,6 +20,7 @@ by `arizona_cowboy_middleware` in front of the owner's own router.
 -export([query_key_limit_applies_to_mounted_routes_only/1]).
 -export([owner_routes_answer_while_mounting_and_unmounting/1]).
 -export([a_request_reads_the_listener_once/1]).
+-export([a_router_routing_to_the_handler_with_nothing_mounted_is_404/1]).
 -export([arizona_routes_answer_while_mounting_and_unmounting/1]).
 -export([a_navigate_on_an_unmounted_listener_is_unresolved/1]).
 
@@ -39,6 +40,7 @@ all() ->
         query_key_limit_applies_to_mounted_routes_only,
         owner_routes_answer_while_mounting_and_unmounting,
         a_request_reads_the_listener_once,
+        a_router_routing_to_the_handler_with_nothing_mounted_is_404,
         arizona_routes_answer_while_mounting_and_unmounting,
         a_navigate_on_an_unmounted_listener_is_unresolved
     ].
@@ -63,6 +65,8 @@ init_per_testcase(an_unmounted_listener_passes_everything_on, Config) ->
 init_per_testcase(owner_routes_answer_while_mounting_and_unmounting, Config) ->
     Config;
 init_per_testcase(arizona_routes_answer_while_mounting_and_unmounting, Config) ->
+    Config;
+init_per_testcase(a_router_routing_to_the_handler_with_nothing_mounted_is_404, Config) ->
     Config;
 init_per_testcase(a_request_reads_the_listener_once, Config) ->
     ok = arizona_cowboy_server:mount(?OWNER, #{routes => [body_route() | routes()]}),
@@ -157,6 +161,25 @@ a_request_reads_the_listener_once(Config) ->
         [{~"/owned", 200, 1}, {~"/hello", 200, 1}, {~"/body", 200, 1}],
         reads(Config, [{~"GET", ~"/owned"}, {~"GET", ~"/hello"}, {~"POST", ~"/body"}])
     ).
+
+%% A router may hand the handler a path itself, with no middleware in front:
+%% the handler then reads the listener's routes, and with none mounted answers
+%% `404` like any path no route serves.
+a_router_routing_to_the_handler_with_nothing_mounted_is_404(Config) when is_list(Config) ->
+    Name = mount_bare,
+    Port = pick_port(),
+    Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
+    {ok, _} = cowboy:start_clear(Name, [{port, Port}], #{env => #{dispatch => Dispatch}}),
+    Bare = [{port, Port}],
+    try
+        ?assertMatch({404, _}, request(Bare, ~"GET", ~"/hello")),
+        ok = arizona_cowboy_server:mount(Name, #{routes => routes()}),
+        ?assertEqual({200, ~"hi"}, request(Bare, ~"GET", ~"/hello")),
+        ok = arizona_cowboy_server:unmount(Name),
+        ?assertMatch({404, _}, request(Bare, ~"GET", ~"/hello"))
+    after
+        ok = cowboy:stop_listener(Name)
+    end.
 
 %% A request the middleware hands to an Arizona route is served from the routes
 %% and limits it read, so an unmount landing mid-request is no crash: the
