@@ -23,6 +23,7 @@ its own.
 -export([asset_non_utf8_file_is_served/1]).
 -export([asset_link_to_a_non_utf8_name_is_followed_inside_only/1]).
 -export([asset_dir_whose_name_is_not_utf8_serves/1]).
+-export([asset_extension_that_is_not_utf8_is_octet_stream/1]).
 -export([asset_traversal_is_refused_in_every_encoding/1]).
 -export([ws_upgrade_with_a_malformed_query_escape_opens/1]).
 -export([navigate_target_with_a_malformed_query_escape_resolves/1]).
@@ -41,6 +42,7 @@ all() ->
         asset_non_utf8_file_is_served,
         asset_link_to_a_non_utf8_name_is_followed_inside_only,
         asset_dir_whose_name_is_not_utf8_serves,
+        asset_extension_that_is_not_utf8_is_octet_stream,
         asset_traversal_is_refused_in_every_encoding,
         ws_upgrade_with_a_malformed_query_escape_opens,
         navigate_target_with_a_malformed_query_escape_resolves
@@ -53,6 +55,8 @@ init_per_suite(Config) ->
     ok = filelib:ensure_path(Dir),
     ok = file:write_file(filename:join(Dir, "app.txt"), ~"asset-bytes"),
     ok = file:write_file(filename:join(Dir, <<"f", 255, ".txt">>), ~"octet-bytes"),
+    ok = file:write_file(filename:join(Dir, <<"a.", 255, 254>>), ~"ext-bytes"),
+    ok = file:write_file(filename:join(Dir, "upper.TXT"), ~"upper-bytes"),
     %% Beside (not under) the asset dir: what a traversal would reach.
     ok = file:write_file(filename:join(Priv, "secret.txt"), ~"top-secret-bytes"),
     ok = file:write_file(filename:join(Priv, <<"s", 255>>), ~"top-secret-bytes"),
@@ -197,6 +201,15 @@ asset_dir_whose_name_is_not_utf8_serves(Config) ->
         ok = arizona_cowboy_server:stop(escapes_raw_dir)
     end.
 
+%% The type comes from the extension, ASCII case folded; one that is not
+%% UTF-8 names no type.
+asset_extension_that_is_not_utf8_is_octet_stream(Config) ->
+    {200, Head, Body} = request_head(Config, ~"GET", ~"/files/a.%FF%FE"),
+    ?assertEqual(~"ext-bytes", Body),
+    ?assertNotEqual(nomatch, binary:match(Head, ~"content-type: application/octet-stream")),
+    {200, Upper, ~"upper-bytes"} = request_head(Config, ~"GET", ~"/files/upper.TXT"),
+    ?assertNotEqual(nomatch, binary:match(Upper, ~"content-type: text/plain")).
+
 %% `..`, `/`, `\` and NUL in a segment are refused however they are spelled,
 %% a byte that is not UTF-8 or a malformed escape beside them included.
 asset_traversal_is_refused_in_every_encoding(Config) ->
@@ -273,6 +286,11 @@ echo(Config, Path) ->
 
 %% One HTTP/1.1 request on its own connection; the status and the body.
 request(Config, Method, Path) ->
+    {Status, _Head, Body} = request_head(Config, Method, Path),
+    {Status, Body}.
+
+%% As `request/3`, with the head too, lowercased (bytes past ASCII kept).
+request_head(Config, Method, Path) ->
     Response = exchange(Config, [
         Method,
         ~" ",
@@ -281,7 +299,10 @@ request(Config, Method, Path) ->
     ]),
     [Head, Body] = binary:split(Response, ~"\r\n\r\n"),
     <<"HTTP/1.1 ", Code:3/binary, _/binary>> = Head,
-    {binary_to_integer(Code), Body}.
+    {binary_to_integer(Code), <<<<(ascii_lower(C))>> || <<C>> <= Head>>, Body}.
+
+ascii_lower(C) when C >= $A, C =< $Z -> C + 32;
+ascii_lower(C) -> C.
 
 %% The head of a WebSocket upgrade's answer.
 upgrade(Config, Target) ->

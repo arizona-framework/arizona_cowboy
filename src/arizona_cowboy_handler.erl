@@ -190,9 +190,8 @@ serve_file(Entry, _Route, outside, Req, Listener) ->
 serve_file(Entry, Route, File, Req, Listener) ->
     case filelib:is_regular(File) of
         true ->
-            {Type, SubType, _Params} = cow_mimetypes:all(iolist_to_binary(File)),
             Headers =
-                [{~"content-type", <<Type/binary, "/", SubType/binary>>}] ++
+                [{~"content-type", content_type(File)}] ++
                     cache_control(Route),
             {Status, Headers1, stream} = wrap(Entry, Req, {200, Headers, stream}),
             Size = filelib:file_size(File),
@@ -200,6 +199,32 @@ serve_file(Entry, Route, File, Req, Listener) ->
         false ->
             finish(Entry, Req, {404, [], <<>>}, Listener)
     end.
+
+%% From the extension, ASCII case folded. `cow_mimetypes` folds it with
+%% `string:lowercase/1`, which raises on bytes that are not UTF-8; no type has
+%% an extension past ASCII, so such a one names none.
+content_type(File) ->
+    case filename:extension(File) of
+        <<$., Ext/binary>> ->
+            case ascii_lowercase(Ext, <<>>) of
+                {ok, Lower} ->
+                    {Type, SubType, _Params} = cow_mimetypes:all(<<"f.", Lower/binary>>),
+                    <<Type/binary, "/", SubType/binary>>;
+                error ->
+                    ~"application/octet-stream"
+            end;
+        _None ->
+            ~"application/octet-stream"
+    end.
+
+ascii_lowercase(<<>>, Acc) ->
+    {ok, Acc};
+ascii_lowercase(<<C, Rest/binary>>, Acc) when C >= $A, C =< $Z ->
+    ascii_lowercase(Rest, <<Acc/binary, (C + 32)>>);
+ascii_lowercase(<<C, Rest/binary>>, Acc) when C < 128 ->
+    ascii_lowercase(Rest, <<Acc/binary, C>>);
+ascii_lowercase(_NotAscii, _Acc) ->
+    error.
 
 controller_reply(Entry, _Handler, {Status, Headers, Body}, Req, Listener) when
     is_integer(Status)
