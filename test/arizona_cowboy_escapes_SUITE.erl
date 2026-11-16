@@ -153,10 +153,13 @@ parse_qs_reads_form_encoding_leniently(Config) when is_list(Config) ->
             {~"x", <<255>>},
             {~"u", ~"é"},
             {~"=", ~"a=b"},
-            {~"r", ~"%G1%41 b"}
+            {~"r", ~"%G1%41 b"},
+            {~"s", ~"%4G%41"},
+            {~"t", ~"%41%4"},
+            {~"u", ~"%41%"}
         ],
         arizona_cowboy_req:parse_qs(
-            ~"a=1&a=2&b+c=d+e%2B&k%G1=v%41&=e&empty=&flag&x=%ff&u=%C3%A9&%3D=a=b&r=%G1%41+b"
+            ~"a=1&a=2&b+c=d+e%2B&k%G1=v%41&=e&empty=&flag&x=%ff&u=%C3%A9&%3D=a=b&r=%G1%41+b&s=%4G%41&t=%41%4&u=%41%"
         )
     ).
 
