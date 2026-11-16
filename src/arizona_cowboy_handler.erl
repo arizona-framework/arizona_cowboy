@@ -157,12 +157,20 @@ websocket_info(Msg, #{socket := Sock} = State) ->
 %% Counted once, eagerly, before anything parses the query: a route that never
 %% reads it refuses one over the listener's `max_query_keys` as one that does,
 %% and a navigate (`arizona_cowboy_req:resolve_route/3`) applies the same rule.
-%% An asset never reads its query.
+%% An asset never reads its query. An upgrade's query is the page's plus the
+%% keys Arizona's client adds, which `arizona_ws` strips before the page sees
+%% it, so those count for none (each once): a page served within the limit can
+%% open its socket and reconnect.
 within_key_limit(#{kind := asset}, _Req, _Listener) ->
     true;
-within_key_limit(_Entry, Req, Listener) ->
+within_key_limit(#{kind := Kind}, Req, Listener) ->
+    Uncounted =
+        case Kind of
+            ws -> [~"_az_path", ~"_az_reconnect", ~"_az_fps_follow", ~"_az_caps"];
+            _Other -> []
+        end,
     arizona_cowboy_req:within_key_limit(
-        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener), []
+        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener), Uncounted
     ).
 
 %% A plain OPTIONS reaches a route only when it was opened for a CORS

@@ -323,11 +323,15 @@ query_with_more_keys_than_the_limit_is_400(Config) ->
     ?assertEqual(100, length(Params)),
     ?assertMatch({400, _}, request(Config, ~"GET", <<"/q?", (keys(101))/binary>>)).
 
-%% `_az_path` is one of the keys.
+%% Only the page's own keys count: a page served with 100 keys opens its socket.
 ws_upgrade_with_more_keys_than_the_limit_is_400(Config) ->
     ?assertMatch(
         <<"HTTP/1.1 400 ", _/binary>>,
-        upgrade(Config, <<"/ws?_az_path=/live&", (keys(100))/binary>>)
+        upgrade(Config, <<"/ws?_az_path=/plain&", (keys(101))/binary>>)
+    ),
+    ?assertMatch(
+        <<"HTTP/1.1 101 ", _/binary>>,
+        upgrade(Config, <<"/ws?_az_path=/plain&", (keys(100))/binary>>)
     ).
 
 %% A navigate cannot be answered `400`: the target is left unresolved, so the
@@ -383,6 +387,18 @@ max_query_keys_sets_the_limit(Config) when is_list(Config) ->
         ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/q?a=1&b&c")),
         ?assertMatch(
             <<"HTTP/1.1 400 ", _/binary>>, upgrade([{port, Port}], ~"/ws?_az_path=/plain&a&b&c")
+        ),
+        %% Arizona's own keys are not the page's: each counts for none, once.
+        ?assertMatch(
+            <<"HTTP/1.1 101 ", _/binary>>,
+            upgrade([{port, Port}], <<
+                "/ws?_az_path=/plain&_az_reconnect=1&_az_fps_follow=1&_az_caps=%7B%7D",
+                "&a&b"
+            >>)
+        ),
+        ?assertMatch(
+            <<"HTTP/1.1 400 ", _/binary>>,
+            upgrade([{port, Port}], ~"/ws?_az_path=/plain&_az_path=/plain&a&b")
         ),
         Raw = upgrade_req(escapes_keys),
         ?assertMatch({ok, _, _, _}, arizona_cowboy_req:resolve_route(~"/plain", ~"a&b", Raw)),
