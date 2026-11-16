@@ -45,12 +45,12 @@ ok = arizona_cowboy_server:mount(my_listener, #{routes => ArizonaRoutes}).
     Req :: cowboy_req:req(),
     Env :: cowboy_middleware:env().
 execute(#{ref := Ref, path := <<$/, _/binary>>} = Req, Env) ->
-    case arizona_cowboy_server:find_table(Ref) of
-        {ok, Table, AnswersMisses} ->
+    case arizona_cowboy_server:find_listener(Ref) of
+        {ok, #{table := Table, answers_misses := AnswersMisses} = Listener} ->
             case arizona_route_table:match(cowboy_req:method(Req), cowboy_req:path(Req), Table) of
-                not_found when AnswersMisses -> serve(Req, Env, Ref);
+                not_found when AnswersMisses -> serve(Req, Env, Ref, Listener);
                 not_found -> {ok, Req, Env};
-                _ArizonaPath -> serve(Req, Env, Ref)
+                _ArizonaPath -> serve(Req, Env, Ref, Listener)
             end;
         error ->
             {ok, Req, Env}
@@ -64,9 +64,11 @@ execute(Req, Env) ->
 
 %% `cowboy_handler` runs the handler and the loop or WebSocket it upgrades to;
 %% the request is answered then, so the owner's chain must not run after it.
-%% (No Arizona loop hibernates, so `cowboy_handler` never suspends here.)
-serve(Req, Env, Ref) ->
+%% (No Arizona loop hibernates, so `cowboy_handler` never suspends here.) The
+%% handler serves from the listener read here, not a second read an unmount
+%% could fall before.
+serve(Req, Env, Ref, Listener) ->
     {ok, Req1, _Env1} = cowboy_handler:execute(Req, Env#{
-        handler => arizona_cowboy_handler, handler_opts => Ref
+        handler => arizona_cowboy_handler, handler_opts => {Ref, Listener}
     }),
     {stop, Req1}.

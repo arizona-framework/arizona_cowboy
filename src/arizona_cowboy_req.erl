@@ -32,6 +32,7 @@ limit.
 -export([new/1]).
 -export([parse_qs/1]).
 -export([within_key_limit/3]).
+-export([with_limits/2]).
 
 %% --------------------------------------------------------------------
 %% arizona_req callbacks
@@ -101,6 +102,17 @@ within_key_limit(Qs, MaxKeys, Uncounted) ->
     {Amp, Eq, _Plus, _Pct, _AmpRun} = persistent_term:get(?MODULE),
     count_keys(skip_empty(Qs), MaxKeys, Uncounted, Amp, Eq).
 
+-doc """
+`CowboyReq` carrying the limits of the listener `Stash` its body is read under,
+so `read_body/1` takes them from the request rather than reading the listener
+again, which an unmount could have removed meanwhile.
+""".
+-spec with_limits(CowboyReq, Stash) -> CowboyReq when
+    CowboyReq :: cowboy_req:req(),
+    Stash :: arizona_cowboy_server:listener().
+with_limits(CowboyReq, #{max_content_length := Max}) ->
+    CowboyReq#{arizona_max_content_length => Max}.
+
 %% --------------------------------------------------------------------
 %% arizona_req behaviour callbacks
 %% --------------------------------------------------------------------
@@ -127,9 +139,9 @@ parse_headers(CowboyReq) ->
     {ok, arizona_req:body(), CowboyReq} | {error, arizona_req:body_error()}
 when
     CowboyReq :: cowboy_req:req().
-read_body(#{ref := Listener} = CowboyReq) ->
+read_body(#{arizona_max_content_length := Max} = CowboyReq) ->
     try
-        read_body(CowboyReq, [], 0, arizona_cowboy_server:max_content_length(Listener))
+        read_body(CowboyReq, [], 0, Max)
     catch
         exit:{timeout, _} -> {error, timeout};
         exit:timeout -> {error, timeout}
@@ -152,7 +164,9 @@ Resolves a navigate target against the routes of the listener that accepted
 `error` for anything but a live route, and for a query string holding more
 keys than the listener's `max_query_keys` (counted by `within_key_limit/3`,
 with nothing uncounted), which an HTTP request to that URL is answered `400`
-for: the client then loads it over HTTP. Never crashes, never replies.
+for: the client then loads it over HTTP. `error` too once the listener no
+longer serves Arizona routes (unmounted or stopped). Never crashes, never
+replies.
 """.
 -spec resolve_route(Path, Qs, CowboyReq) -> {ok, Handler, RouteOpts, ArzReq} | error when
     Path :: arizona_req:path(),
@@ -161,15 +175,20 @@ for: the client then loads it over HTTP. Never crashes, never replies.
     Handler :: module(),
     RouteOpts :: arizona_live:route_opts(),
     ArzReq :: arizona_req:request().
-resolve_route(Path, Qs, #{ref := Listener} = CowboyReq) when is_binary(Path) ->
-    case
-        within_key_limit(Qs, arizona_cowboy_server:max_query_keys(Listener), []) andalso
-            arizona_route_table:match(~"GET", Path, arizona_cowboy_server:table(Listener))
-    of
-        {ok, #{kind := live, target := #{handler := Handler} = Live}, Bindings} ->
-            NavReq = CowboyReq#{path => Path, qs => Qs, bindings => Bindings},
-            {ok, Handler, maps:without([handler], Live), new(NavReq)};
-        _NotALivePage ->
+resolve_route(Path, Qs, #{ref := Ref} = CowboyReq) when is_binary(Path) ->
+    case arizona_cowboy_server:find_listener(Ref) of
+        {ok, #{table := Table, max_query_keys := MaxKeys}} ->
+            case
+                within_key_limit(Qs, MaxKeys, []) andalso
+                    arizona_route_table:match(~"GET", Path, Table)
+            of
+                {ok, #{kind := live, target := #{handler := Handler} = Live}, Bindings} ->
+                    NavReq = CowboyReq#{path => Path, qs => Qs, bindings => Bindings},
+                    {ok, Handler, maps:without([handler], Live), new(NavReq)};
+                _NotALivePage ->
+                    error
+            end;
+        error ->
             error
     end;
 resolve_route(_Path, _Qs, _CowboyReq) ->

@@ -19,6 +19,8 @@ by `arizona_cowboy_middleware` in front of the owner's own router.
 -export([options_star_passes_on_to_the_owner/1]).
 -export([query_key_limit_applies_to_mounted_routes_only/1]).
 -export([owner_routes_answer_while_mounting_and_unmounting/1]).
+-export([arizona_routes_answer_while_mounting_and_unmounting/1]).
+-export([a_navigate_on_an_unmounted_listener_is_unresolved/1]).
 
 -define(OWNER, mount_owner).
 
@@ -31,7 +33,9 @@ all() ->
         drain_and_stop_leave_the_owners_listener_up,
         options_star_passes_on_to_the_owner,
         query_key_limit_applies_to_mounted_routes_only,
-        owner_routes_answer_while_mounting_and_unmounting
+        owner_routes_answer_while_mounting_and_unmounting,
+        arizona_routes_answer_while_mounting_and_unmounting,
+        a_navigate_on_an_unmounted_listener_is_unresolved
     ].
 
 init_per_suite(Config) ->
@@ -52,6 +56,13 @@ end_per_suite(Config) when is_list(Config) ->
 init_per_testcase(an_unmounted_listener_passes_everything_on, Config) ->
     Config;
 init_per_testcase(owner_routes_answer_while_mounting_and_unmounting, Config) ->
+    Config;
+init_per_testcase(arizona_routes_answer_while_mounting_and_unmounting, Config) ->
+    Config;
+init_per_testcase(a_navigate_on_an_unmounted_listener_is_unresolved, Config) ->
+    ok = arizona_cowboy_server:mount(?OWNER, #{
+        routes => [{live, ~"/live", arizona_cowboy_echo_page, #{}}]
+    }),
     Config;
 init_per_testcase(options_star_passes_on_to_the_owner, Config) ->
     ok = arizona_cowboy_server:mount(?OWNER, #{
@@ -125,23 +136,92 @@ query_key_limit_applies_to_mounted_routes_only(Config) ->
 %% unmount landing while it handles a request to one of the owner's own routes
 %% is no crash, the request is passed on either way. A race, so many tries.
 owner_routes_answer_while_mounting_and_unmounting(Config) ->
-    Flipper = spawn_link(fun Flip() ->
-        ok = arizona_cowboy_server:mount(?OWNER, #{routes => routes()}),
-        ok = arizona_cowboy_server:unmount(?OWNER),
-        Flip()
-    end),
+    Flipper = flipper(routes()),
     Answers =
         try
             [request(Config, ~"GET", ~"/owned") || _ <- lists:seq(1, 4000)]
         after
-            unlink(Flipper),
-            exit(Flipper, kill)
+            ok = stop_flipper(Flipper)
         end,
     ?assertEqual([], [Answer || {Status, _} = Answer <- Answers, Status =/= 200]).
+
+%% A request the middleware hands to an Arizona route is served from the routes
+%% and limits it read, so an unmount landing mid-request is no crash: the
+%% request is served (`200`) or, read before the mount, the owner's (`404`). The
+%% body read takes the listener's `max_content_length` too.
+arizona_routes_answer_while_mounting_and_unmounting(Config) ->
+    Routes = [
+        {post, ~"/body", arizona_cowboy_body_controller, #{state => #{prefix => ~"read "}}}
+        | routes()
+    ],
+    Flipper = flipper(Routes),
+    Answers =
+        try
+            [
+                request(Config, Method, Path)
+             || _ <- lists:seq(1, 2000),
+                {Method, Path} <- [{~"GET", ~"/hello"}, {~"POST", ~"/body"}]
+            ]
+        after
+            ok = stop_flipper(Flipper)
+        end,
+    ?assertEqual([], [Answer || {Status, _} = Answer <- Answers, Status =/= 200, Status =/= 404]).
+
+%% A live session can outlast its routes: a navigate after the unmount is left
+%% unresolved, as one to a URL no route serves, rather than crashing.
+a_navigate_on_an_unmounted_listener_is_unresolved(Config) when is_list(Config) ->
+    Raw = upgrade_req(?OWNER),
+    ?assertMatch({ok, _, _, _}, arizona_cowboy_req:resolve_route(~"/live", <<>>, Raw)),
+    ok = arizona_cowboy_server:unmount(?OWNER),
+    ?assertEqual(error, arizona_cowboy_req:resolve_route(~"/live", <<>>, Raw)).
 
 %% --------------------------------------------------------------------
 %% Helpers
 %% --------------------------------------------------------------------
+
+%% Mounts `Routes` on the owner's listener and unmounts them, over and over,
+%% until `stop_flipper/1`.
+flipper(Routes) ->
+    spawn_link(fun Flip() ->
+        ok = arizona_cowboy_server:mount(?OWNER, #{routes => Routes}),
+        ok = arizona_cowboy_server:unmount(?OWNER),
+        receive
+            stop -> ok
+        after 0 -> Flip()
+        end
+    end).
+
+%% Stopped after a whole mount and unmount, never in the middle of one, so the
+%% case ends with nothing mounted.
+stop_flipper(Flipper) ->
+    Monitor = monitor(process, Flipper),
+    Flipper ! stop,
+    receive
+        {'DOWN', Monitor, process, Flipper, normal} -> ok
+    after 5000 -> error(flipper_did_not_stop)
+    end.
+
+%% A WebSocket upgrade's request to `Listener`, as Cowboy hands it over.
+upgrade_req(Listener) ->
+    #{
+        ref => Listener,
+        pid => self(),
+        streamid => 1,
+        peer => {{127, 0, 0, 1}, 50000},
+        sock => {{127, 0, 0, 1}, 4040},
+        cert => undefined,
+        method => ~"CONNECT",
+        version => 'HTTP/2',
+        scheme => ~"http",
+        host => ~"localhost",
+        port => 4040,
+        path => ~"/ws",
+        qs => <<>>,
+        headers => #{},
+        has_body => false,
+        body_length => 0,
+        bindings => #{}
+    }.
 
 routes() ->
     [{get, ~"/hello", arizona_cowboy_smoke_controller, #{state => #{body => ~"hi"}}}].
