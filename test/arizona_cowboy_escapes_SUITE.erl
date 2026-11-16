@@ -21,6 +21,7 @@ its own.
 -export([options_star_is_no_arizona_path/1]).
 -export([misses_reach_routes_given_in_proto_opts/1]).
 -export([misses_reach_a_dispatch_given_alone_in_proto_opts/1]).
+-export([misses_reach_middlewares_given_alone_in_proto_opts/1]).
 -export([asset_missing_non_utf8_file_is_404/1]).
 -export([asset_non_utf8_file_is_served/1]).
 -export([asset_link_to_a_non_utf8_name_is_followed_inside_only/1]).
@@ -58,6 +59,7 @@ all() ->
         options_star_is_no_arizona_path,
         misses_reach_routes_given_in_proto_opts,
         misses_reach_a_dispatch_given_alone_in_proto_opts,
+        misses_reach_middlewares_given_alone_in_proto_opts,
         asset_missing_non_utf8_file_is_404,
         asset_non_utf8_file_is_served,
         asset_link_to_a_non_utf8_name_is_followed_inside_only,
@@ -254,6 +256,30 @@ misses_reach_a_dispatch_given_alone_in_proto_opts(Config) when is_list(Config) -
         ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/nope/%G1"))
     after
         ok = arizona_cowboy_server:stop(escapes_env_only)
+    end.
+
+%% `middlewares` alone may put the owner's own middleware behind Arizona's, in
+%% front of the adapter's dispatch: a miss reaches it.
+misses_reach_middlewares_given_alone_in_proto_opts(Config) when is_list(Config) ->
+    Port = pick_port(),
+    {ok, _} = arizona_cowboy_server:start(escapes_middlewares_only, #{
+        transport_opts => [{port, Port}],
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}],
+        proto_opts => #{
+            middlewares => [
+                arizona_cowboy_middleware,
+                arizona_cowboy_health_middleware,
+                cowboy_router,
+                cowboy_handler
+            ]
+        }
+    }),
+    try
+        ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q")),
+        ?assertEqual({200, ~"healthy"}, request([{port, Port}], ~"GET", ~"/health")),
+        ?assertMatch({404, _}, request([{port, Port}], ~"GET", ~"/nope"))
+    after
+        ok = arizona_cowboy_server:stop(escapes_middlewares_only)
     end.
 
 %% `OPTIONS *` addresses the server, not a resource: a route whose pattern would
