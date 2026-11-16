@@ -371,7 +371,10 @@ within_key_limit_counts_non_empty_pairs(Config) when is_list(Config) ->
     ?assertNot(arizona_cowboy_req:within_key_limit(~"a&b&c", 2, [])),
     ?assertNot(arizona_cowboy_req:within_key_limit(~"=", 0, [])),
     ?assert(arizona_cowboy_req:within_key_limit(keys(100), 100, [])),
-    ?assertNot(arizona_cowboy_req:within_key_limit(keys(101), 100, [])).
+    ?assertNot(arizona_cowboy_req:within_key_limit(keys(101), 100, [])),
+    %% An empty pair right after an uncounted key is still no key.
+    ?assert(arizona_cowboy_req:within_key_limit(~"_az_path=x&&a", 1, [~"_az_path"])),
+    ?assertNot(arizona_cowboy_req:within_key_limit(~"_az_path=x&&a&b", 1, [~"_az_path"])).
 
 %% The limit is the request's, not the parser's: a route that never reads its
 %% query refuses one over it as one that does.
@@ -418,6 +421,10 @@ max_query_keys_sets_the_limit(Config) when is_list(Config) ->
         ?assertMatch(
             <<"HTTP/1.1 400 ", _/binary>>,
             upgrade([{port, Port}], ~"/ws?_az_path=/plain&_az_path=/plain&a&b")
+        ),
+        %% A page URL of `?&a=1&b` reaches the upgrade as `_az_path=/plain&&a=1&b`.
+        ?assertMatch(
+            <<"HTTP/1.1 101 ", _/binary>>, upgrade([{port, Port}], ~"/ws?_az_path=/plain&&a=1&b")
         ),
         Raw = upgrade_req(escapes_keys),
         ?assertMatch({ok, _, _, _}, arizona_cowboy_req:resolve_route(~"/plain", ~"a&b", Raw)),
