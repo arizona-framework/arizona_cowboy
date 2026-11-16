@@ -149,16 +149,15 @@ scan(<<$&, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) ->
     scan(Rest, Rest, 0, plain, <<>>, none, emit(Start, Len, Mode, Acc, Key, Pairs));
 scan(<<$=, Rest/binary>>, Start, Len, Mode, Acc, none, Pairs) ->
     scan(Rest, Rest, 0, plain, <<>>, {key, component(Start, Len, Mode, Acc)}, Pairs);
-scan(<<_Byte, Rest/binary>>, Start, Len, raw, Acc, Key, Pairs) ->
-    scan(Rest, Start, Len + 1, raw, Acc, Key, Pairs);
-scan(<<$+, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) ->
+scan(<<$+, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) when Mode =/= raw ->
     scan(Rest, Start, Len + 1, dec, <<(decoded(Start, Len, Mode, Acc))/binary, $\s>>, Key, Pairs);
 scan(<<$%, High, Low, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) when
-    ?IS_HEX(High), ?IS_HEX(Low)
+    Mode =/= raw, ?IS_HEX(High), ?IS_HEX(Low)
 ->
     Octet = unhex(High) * 16 + unhex(Low),
     scan(Rest, Start, Len + 3, dec, <<(decoded(Start, Len, Mode, Acc))/binary, Octet>>, Key, Pairs);
-scan(<<$%, Rest/binary>>, Start, Len, _Mode, Acc, Key, Pairs) ->
+%% Raw from an escape that does not decode to the end of the key or value.
+scan(<<Byte, Rest/binary>>, Start, Len, Mode, Acc, Key, Pairs) when Mode =:= raw; Byte =:= $% ->
     scan(Rest, Start, Len + 1, raw, Acc, Key, Pairs);
 scan(<<_Byte, Rest/binary>>, Start, Len, plain, Acc, Key, Pairs) ->
     scan(Rest, Start, Len + 1, plain, Acc, Key, Pairs);
