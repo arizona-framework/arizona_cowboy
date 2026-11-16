@@ -7,20 +7,21 @@ The raw value is Cowboy's request map. Path bindings are the ones
 `bindings` key (binary names, percent-decoded values), since no Cowboy router
 matches an Arizona route.
 
-The query string is parsed by `parse_qs/2` rather than Cowboy's
-`cowboy_req:parse_qs/1`, which refuses a malformed escape with `400`. It keeps
-Cowboy's limit on the number of keys, the listener's `max_query_keys`
-(default `100`, Cowboy's own): a query with more is answered `400` over HTTP and
-on a WebSocket upgrade, as Cowboy answers it, and a navigate to it is left
-unresolved, so the client loads it over HTTP and gets that answer.
+The query string is parsed by `parse_qs/1` rather than Cowboy's
+`cowboy_req:parse_qs/1`, which refuses a malformed escape with `400`. Its keys
+are counted before anything reads it (`within_key_limit/3`): a request to a
+live or controller route, or a WebSocket upgrade, whose query holds more than
+the listener's `max_query_keys` is answered `400`, and `resolve_route/3` leaves
+a navigate to one unresolved, so the client loads it over HTTP and gets that
+`400` too.
 """.
 
 -behaviour(arizona_req).
 
 -on_load(init_patterns/0).
 
-%% Cowboy's own default.
--define(MAX_KEYS, 100).
+%% 64 empty pairs, skipped in one comparison.
+-define(AMP64, <<"&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&">>).
 
 %% --------------------------------------------------------------------
 %% API function exports
@@ -28,7 +29,7 @@ unresolved, so the client loads it over HTTP and gets that answer.
 
 -export([new/1]).
 -export([parse_qs/1]).
--export([parse_qs/2]).
+-export([within_key_limit/3]).
 
 %% --------------------------------------------------------------------
 %% arizona_req callbacks
@@ -62,33 +63,38 @@ order, repeated keys kept: `+` is a space and each `%HH` escape the octet it
 encodes, UTF-8 or not, and a bare key (`?debug`) is `true`. Empty pairs are
 skipped. A key or value holding an escape that does not decode (`%G1`, a
 trailing `%4` or `%`) is kept as written, only its `+` turned to spaces, as
-browsers send such a URL as typed. At most 100 keys, as `parse_qs/2`.
+browsers send such a URL as typed. It sets no limit on the number of keys:
+check that first, with `within_key_limit/3`.
 """.
 -spec parse_qs(Qs) -> [{binary(), binary() | true}] when
     Qs :: binary().
-parse_qs(Qs) ->
-    parse_qs(Qs, ?MAX_KEYS).
-
--doc """
-As `parse_qs/1`, refusing a query string with more than `MaxKeys` keys (empty
-pairs are none) the way Cowboy's own parser does: it exits with
-`{request_error, limit_reached, _}`, which Cowboy answers `400`. A cap on what
-one request makes the server build, which roadrunner's parser does not have.
-""".
--spec parse_qs(Qs, MaxKeys) -> [{binary(), binary() | true}] when
-    Qs :: binary(),
-    MaxKeys :: non_neg_integer().
-parse_qs(<<>>, _MaxKeys) ->
+parse_qs(<<>>) ->
     [];
-parse_qs(Qs, MaxKeys) ->
+parse_qs(Qs) ->
     {Amp, Eq, Plus, Pct} = persistent_term:get(?MODULE),
-    Pairs = split_pairs(Qs, Amp, MaxKeys),
+    Pairs = [Pair || Pair <- binary:split(Qs, Amp, [global]), Pair =/= <<>>],
     %% One scan of the whole string first: with no `+` or `%` in it, the usual
     %% `?id=123&limit=50`, no key or value needs decoding.
     case is_plain(Qs, Plus, Pct) of
         true -> [split_pair(Pair, Eq) || Pair <- Pairs];
         false -> [decode_pair(Pair, Eq, Plus, Pct) || Pair <- Pairs]
     end.
+
+-doc """
+Whether the raw query string `Qs` holds at most `MaxKeys` keys: its non-empty
+pairs, an empty one (`&&`, a leading or trailing `&`) counting for none. Each
+key in `Uncounted` (as written, before `=`) is not counted the first time it
+occurs; a repeat is. Counting stops at the first key past the limit, and a run
+of empty pairs is skipped without looking for each `&`, so the cost is bounded
+by the limit and the string's length, not by its number of `&`.
+""".
+-spec within_key_limit(Qs, MaxKeys, Uncounted) -> boolean() when
+    Qs :: binary(),
+    MaxKeys :: non_neg_integer(),
+    Uncounted :: [binary()].
+within_key_limit(Qs, MaxKeys, Uncounted) ->
+    {Amp, Eq, _Plus, _Pct} = persistent_term:get(?MODULE),
+    count_keys(skip_empty(Qs), MaxKeys, Uncounted, Amp, Eq).
 
 %% --------------------------------------------------------------------
 %% arizona_req behaviour callbacks
@@ -98,9 +104,10 @@ parse_qs(Qs, MaxKeys) ->
 parse_bindings(CowboyReq) ->
     maps:get(bindings, CowboyReq, #{}).
 
+%% The listener counted the keys before the request reached its route.
 -spec parse_params(cowboy_req:req()) -> arizona_req:params().
-parse_params(#{ref := Listener} = CowboyReq) ->
-    parse_qs(cowboy_req:qs(CowboyReq), arizona_cowboy_server:max_query_keys(Listener)).
+parse_params(CowboyReq) ->
+    parse_qs(cowboy_req:qs(CowboyReq)).
 
 -spec parse_cookies(cowboy_req:req()) -> arizona_req:cookies().
 parse_cookies(CowboyReq) ->
@@ -150,7 +157,7 @@ never crashes, never replies.
     ArzReq :: arizona_req:request().
 resolve_route(Path, Qs, #{ref := Listener} = CowboyReq) when is_binary(Path) ->
     case
-        within_key_limit(Qs, Listener) andalso
+        within_key_limit(Qs, arizona_cowboy_server:max_query_keys(Listener), []) andalso
             arizona_route_table:match(~"GET", Path, arizona_cowboy_server:table(Listener))
     of
         {ok, #{kind := live, target := #{handler := Handler} = Live}, Bindings} ->
@@ -177,40 +184,27 @@ init_patterns() ->
         binary:compile_pattern(~"%")
     }).
 
-within_key_limit(Qs, Listener) ->
-    try parse_qs(Qs, arizona_cowboy_server:max_query_keys(Listener)) of
-        _Params -> true
-    catch
-        exit:{request_error, limit_reached, _Reason} -> false
+count_keys(<<>>, _Left, _Uncounted, _Amp, _Eq) ->
+    true;
+count_keys(Qs, Left, Uncounted, Amp, Eq) ->
+    {Pair, Rest} =
+        case binary:match(Qs, Amp) of
+            nomatch -> {Qs, <<>>};
+            {At, 1} -> {binary:part(Qs, 0, At), binary:part(Qs, At + 1, byte_size(Qs) - At - 1)}
+        end,
+    [Key | _Value] = binary:split(Pair, Eq),
+    case lists:member(Key, Uncounted) of
+        true -> count_keys(skip_empty(Rest), Left, lists:delete(Key, Uncounted), Amp, Eq);
+        false when Left =:= 0 -> false;
+        false -> count_keys(skip_empty(Rest), Left - 1, Uncounted, Amp, Eq)
     end.
 
-%% The non-empty pairs of `Qs`. A string no longer than `2 * MaxKeys` cannot
-%% hold more than `MaxKeys` of them and is split whole; a longer one is split
-%% pair by pair, so a huge one is refused before it is all built.
-split_pairs(Qs, Amp, MaxKeys) when byte_size(Qs) =< 2 * MaxKeys ->
-    [Pair || Pair <- binary:split(Qs, Amp, [global]), Pair =/= <<>>];
-split_pairs(Qs, Amp, MaxKeys) ->
-    split_pairs(Qs, Amp, 0, MaxKeys, []).
-
-split_pairs(Qs, Amp, Pos, Left, Acc) ->
-    Size = byte_size(Qs),
-    case binary:match(Qs, Amp, [{scope, {Pos, Size - Pos}}]) of
-        nomatch ->
-            lists:reverse(add_pair(binary:part(Qs, Pos, Size - Pos), Left, Acc));
-        {At, 1} when At =:= Pos -> split_pairs(Qs, Amp, At + 1, Left, Acc);
-        {At, 1} ->
-            split_pairs(
-                Qs, Amp, At + 1, Left - 1, add_pair(binary:part(Qs, Pos, At - Pos), Left, Acc)
-            )
-    end.
-
-add_pair(<<>>, _Left, Acc) -> Acc;
-add_pair(_Pair, 0, _Acc) -> limit_reached();
-add_pair(Pair, _Left, Acc) -> [Pair | Acc].
-
-%% What Cowboy's own parser exits with, which Cowboy answers `400`.
-limit_reached() ->
-    exit({request_error, limit_reached, 'Limit reached while parsing query string.'}).
+skip_empty(<<Run:64/binary, Rest/binary>>) when Run =:= ?AMP64 ->
+    skip_empty(Rest);
+skip_empty(<<$&, Rest/binary>>) ->
+    skip_empty(Rest);
+skip_empty(Rest) ->
+    Rest.
 
 %% Neither a `+` nor a `%` in `Bin`, so nothing to decode.
 is_plain(Bin, Plus, Pct) ->

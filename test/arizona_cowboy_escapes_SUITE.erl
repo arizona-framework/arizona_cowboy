@@ -32,7 +32,9 @@ its own.
 -export([query_with_more_keys_than_the_limit_is_400/1]).
 -export([ws_upgrade_with_more_keys_than_the_limit_is_400/1]).
 -export([navigate_target_with_more_keys_than_the_limit_is_a_full_load/1]).
--export([parse_qs_refuses_more_keys_than_asked/1]).
+-export([within_key_limit_counts_non_empty_pairs/1]).
+-export([routes_that_never_read_the_query_still_apply_the_limit/1]).
+-export([a_long_run_of_empty_pairs_counts_nothing/1]).
 -export([max_query_keys_sets_the_limit/1]).
 
 -define(LISTENER, escapes).
@@ -58,7 +60,9 @@ all() ->
         query_with_more_keys_than_the_limit_is_400,
         ws_upgrade_with_more_keys_than_the_limit_is_400,
         navigate_target_with_more_keys_than_the_limit_is_a_full_load,
-        parse_qs_refuses_more_keys_than_asked,
+        within_key_limit_counts_non_empty_pairs,
+        routes_that_never_read_the_query_still_apply_the_limit,
+        a_long_run_of_empty_pairs_counts_nothing,
         max_query_keys_sets_the_limit
     ].
 
@@ -89,6 +93,9 @@ init_per_suite(Config) ->
             {get, ~"/items/:id", arizona_cowboy_echo_controller, #{}},
             {get, ~"/q", arizona_cowboy_echo_controller, #{}},
             {asset, ~"/files", {dir, Dir}, #{}},
+            %% Neither reads the query.
+            {live, ~"/plain", arizona_cowboy_echo_page, #{}},
+            {get, ~"/hello", arizona_cowboy_smoke_controller, #{state => #{body => ~"hi"}}},
             %% Mounts only when the query reaches it as ?PARAMS.
             {live, ~"/live", arizona_cowboy_echo_page, #{
                 middlewares => [
@@ -334,11 +341,31 @@ navigate_target_with_more_keys_than_the_limit_is_a_full_load(Config) when is_lis
         arizona_cowboy_req:resolve_route(~"/live", keys(100), upgrade_req(?LISTENER))
     ).
 
-parse_qs_refuses_more_keys_than_asked(Config) when is_list(Config) ->
-    ?assertEqual([{~"a", true}, {~"b", true}], arizona_cowboy_req:parse_qs(~"a&&b&", 2)),
-    ?assertExit({request_error, limit_reached, _}, arizona_cowboy_req:parse_qs(~"a&b&c", 2)),
-    ?assertEqual(100, length(arizona_cowboy_req:parse_qs(keys(100)))),
-    ?assertExit({request_error, limit_reached, _}, arizona_cowboy_req:parse_qs(keys(101))).
+within_key_limit_counts_non_empty_pairs(Config) when is_list(Config) ->
+    ?assert(arizona_cowboy_req:within_key_limit(<<>>, 0, [])),
+    ?assert(arizona_cowboy_req:within_key_limit(~"&&&", 0, [])),
+    ?assert(arizona_cowboy_req:within_key_limit(~"&a&&b=&", 2, [])),
+    ?assertNot(arizona_cowboy_req:within_key_limit(~"a&b&c", 2, [])),
+    ?assertNot(arizona_cowboy_req:within_key_limit(~"=", 0, [])),
+    ?assert(arizona_cowboy_req:within_key_limit(keys(100), 100, [])),
+    ?assertNot(arizona_cowboy_req:within_key_limit(keys(101), 100, [])).
+
+%% The limit is the request's, not the parser's: a route that never reads its
+%% query refuses one over it as one that does.
+routes_that_never_read_the_query_still_apply_the_limit(Config) ->
+    [
+        ?assertMatch({400, _}, request(Config, ~"GET", <<Path/binary, "?", (keys(101))/binary>>))
+     || Path <- [~"/plain", ~"/hello"]
+    ],
+    ?assertMatch({200, _}, request(Config, ~"GET", <<"/plain?", (keys(100))/binary>>)),
+    %% An asset never reads it.
+    ?assertMatch({200, _}, request(Config, ~"GET", <<"/files/app.txt?", (keys(101))/binary>>)).
+
+%% Empty pairs are no keys, however many.
+a_long_run_of_empty_pairs_counts_nothing(Config) when is_list(Config) ->
+    Run = binary:copy(~"&", 10485760),
+    ?assert(arizona_cowboy_req:within_key_limit(<<Run/binary, "a=1&", Run/binary>>, 1, [])),
+    ?assertNot(arizona_cowboy_req:within_key_limit(<<Run/binary, "a&", Run/binary, "b">>, 1, [])).
 
 max_query_keys_sets_the_limit(Config) when is_list(Config) ->
     Port = pick_port(),

@@ -63,13 +63,19 @@ init(Req, Listener) ->
             {ok, reply({405, [{~"allow", join(Allow)}], <<>>}, Req), Listener};
         {ok, #{transforms := Transforms} = Entry, Bindings} ->
             Req1 = Req#{bindings => Bindings},
-            case
-                arizona_http_transforms:preflight(
-                    Transforms, cowboy_req:method(Req1), cowboy_req:headers(Req1)
-                )
-            of
-                none -> serve(Entry, Req1, Listener);
-                Preflight -> {ok, reply(Preflight, Req1), Listener}
+            case within_key_limit(Entry, Req1, Listener) of
+                false ->
+                    %% What Cowboy's own query parser has answered.
+                    {ok, reply({400, [], <<>>}, Req1), Listener};
+                true ->
+                    case
+                        arizona_http_transforms:preflight(
+                            Transforms, cowboy_req:method(Req1), cowboy_req:headers(Req1)
+                        )
+                    of
+                        none -> serve(Entry, Req1, Listener);
+                        Preflight -> {ok, reply(Preflight, Req1), Listener}
+                    end
             end
     end.
 
@@ -148,6 +154,17 @@ websocket_info(Msg, #{socket := Sock} = State) ->
 %% Internal functions
 %% --------------------------------------------------------------------
 
+%% Counted once, eagerly, before anything parses the query: a route that never
+%% reads it refuses one over the listener's `max_query_keys` as one that does,
+%% and a navigate (`arizona_cowboy_req:resolve_route/3`) applies the same rule.
+%% An asset never reads its query.
+within_key_limit(#{kind := asset}, _Req, _Listener) ->
+    true;
+within_key_limit(_Entry, Req, Listener) ->
+    arizona_cowboy_req:within_key_limit(
+        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener), []
+    ).
+
 %% A plain OPTIONS reaches a route only when it was opened for a CORS
 %% preflight; it answers with the URL's Allow set, never the route.
 serve(#{cors_options := true} = Entry, #{method := ~"OPTIONS"} = Req, Listener) ->
@@ -168,10 +185,9 @@ serve(#{kind := Kind, target := #{handler := Handler} = Controller} = Entry, Req
     ),
     controller_reply(Entry, Handler, Reply, arizona_req:raw(ArzReq), Listener);
 serve(#{kind := ws}, Req, Listener) ->
-    QS = arizona_cowboy_req:parse_qs(
-        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener)
-    ),
-    case arizona_ws:upgrade(QS, arizona_cowboy_req, Req) of
+    case
+        arizona_ws:upgrade(arizona_cowboy_req:parse_qs(cowboy_req:qs(Req)), arizona_cowboy_req, Req)
+    of
         {reply, Status, Headers, Raw} ->
             {ok, reply({Status, Headers, <<>>}, Raw), Listener};
         {upgrade, Headers, WsState} ->
