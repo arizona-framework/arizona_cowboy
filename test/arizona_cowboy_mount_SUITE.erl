@@ -16,6 +16,7 @@ by `arizona_cowboy_middleware` in front of the owner's own router.
 -export([an_unmounted_listener_passes_everything_on/1]).
 -export([mounts_once/1]).
 -export([drain_and_stop_leave_the_owners_listener_up/1]).
+-export([options_star_passes_on_to_the_owner/1]).
 
 -define(OWNER, mount_owner).
 
@@ -25,7 +26,8 @@ all() ->
         an_arizona_path_owns_its_methods,
         an_unmounted_listener_passes_everything_on,
         mounts_once,
-        drain_and_stop_leave_the_owners_listener_up
+        drain_and_stop_leave_the_owners_listener_up,
+        options_star_passes_on_to_the_owner
     ].
 
 init_per_suite(Config) ->
@@ -44,6 +46,13 @@ end_per_suite(Config) when is_list(Config) ->
     ok = application:stop(arizona).
 
 init_per_testcase(an_unmounted_listener_passes_everything_on, Config) ->
+    Config;
+init_per_testcase(options_star_passes_on_to_the_owner, Config) ->
+    ok = arizona_cowboy_server:mount(?OWNER, #{
+        routes => [
+            {match, '*', ~"/:any", arizona_cowboy_smoke_controller, #{state => #{body => ~"hi"}}}
+        ]
+    }),
     Config;
 init_per_testcase(_Case, Config) ->
     ok = arizona_cowboy_server:mount(?OWNER, #{routes => routes()}),
@@ -89,6 +98,12 @@ drain_and_stop_leave_the_owners_listener_up(Config) ->
     ?assertEqual(ok, arizona_cowboy_server:stop(?OWNER)),
     ?assertMatch({200, <<"owner">>}, request(Config, ~"GET", ~"/owned")),
     ?assertEqual({error, not_found}, arizona_cowboy_server:unmount(?OWNER)).
+
+%% `OPTIONS *` addresses the server, not a resource: no Arizona route answers
+%% it, however its pattern would read a `*` segment.
+options_star_passes_on_to_the_owner(Config) ->
+    ?assertMatch({200, <<"hi">>}, request(Config, ~"OPTIONS", ~"/x")),
+    ?assertMatch({404, _}, request(Config, ~"OPTIONS", ~"*")).
 
 %% --------------------------------------------------------------------
 %% Helpers

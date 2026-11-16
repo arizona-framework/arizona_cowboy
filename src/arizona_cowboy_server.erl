@@ -3,10 +3,15 @@
 The Cowboy `arizona_server` adapter: boots a Cowboy listener serving Arizona
 routes.
 
-Cowboy's router sees one catch-all route to `arizona_cowboy_handler`; the
-Arizona routes are compiled by `arizona_route_table` into a table kept per
+The Arizona routes are compiled by `arizona_route_table` into a table kept per
 listener in a `persistent_term`, which the handler and
-`arizona_cowboy_req:resolve_route/3` read.
+`arizona_cowboy_req:resolve_route/3` read. The listener's middleware chain is
+`arizona_cowboy_middleware`, then Cowboy's router with one catch-all route to
+`arizona_cowboy_handler`, then `cowboy_handler`: Arizona's matcher sees every
+path first, as on a mounted listener, so a path Cowboy's router would refuse
+(a malformed escape) is still matched; the rest reach the router as before,
+which answers what Arizona does not serve (`404`, or `400` for a path it cannot
+parse).
 
 ## Mounting on a listener another framework owns
 
@@ -41,6 +46,9 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   `{arizona_error_page, render}` for Arizona's HTML dev page.
 - `proto_opts` -- merged into Cowboy's protocol options. `enable_connect_protocol`
   is `true` by default, so a client may open a WebSocket over HTTP/2 (RFC 8441).
+  A `middlewares` or `env` given here replaces the adapter's own, so keep
+  `arizona_cowboy_middleware` in front of a router dispatching to
+  `arizona_cowboy_handler` (with the listener name as its options).
 - `ws_opts` -- merged into the `cowboy_websocket` options of every live session
   (default `#{idle_timeout => infinity, max_frame_size => 10485760}`: the frame
   cap bounds what one client can make a session buffer).
@@ -268,7 +276,11 @@ start_new(Name, #{routes := Routes} = Opts) ->
     persistent_term:put(?KEY(Name), Stash#{owner => self}),
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
     ProtoOpts = maps:merge(
-        #{env => #{dispatch => Dispatch}, enable_connect_protocol => true},
+        #{
+            middlewares => [arizona_cowboy_middleware, cowboy_router, cowboy_handler],
+            env => #{dispatch => Dispatch},
+            enable_connect_protocol => true
+        },
         maps:get(proto_opts, Opts, #{})
     ),
     case start_listener(Name, Tls, transport_opts(Opts), ProtoOpts) of

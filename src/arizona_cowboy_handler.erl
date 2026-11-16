@@ -1,7 +1,9 @@
 -module(arizona_cowboy_handler).
 -moduledoc """
-The Cowboy adapter's single handler: every request reaches it through the
-listener's catch-all route, and it routes with `arizona_route_table`.
+The Cowboy adapter's single handler: a request reaches it through
+`arizona_cowboy_middleware` (a path an Arizona route matches) or, on a listener
+this adapter started, the router's catch-all route (any other path, answered
+`404`), and it routes with `arizona_route_table`.
 
 What each route kind answers comes from core -- `arizona_http:reply/3` for a
 page, `arizona_ws:upgrade/3` for a WebSocket, `arizona_controller:dispatch/3`
@@ -166,7 +168,8 @@ serve(#{kind := Kind, target := #{handler := Handler} = Controller} = Entry, Req
     ),
     controller_reply(Entry, Handler, Reply, arizona_req:raw(ArzReq), Listener);
 serve(#{kind := ws}, Req, Listener) ->
-    case arizona_ws:upgrade(cowboy_req:parse_qs(Req), arizona_cowboy_req, Req) of
+    QS = arizona_cowboy_req:parse_qs(cowboy_req:qs(Req)),
+    case arizona_ws:upgrade(QS, arizona_cowboy_req, Req) of
         {reply, Status, Headers, Raw} ->
             {ok, reply({Status, Headers, <<>>}, Raw), Listener};
         {upgrade, Headers, WsState} ->
@@ -316,17 +319,20 @@ asset_file(Dir, Segments) ->
 inside(Dir, File) ->
     case {real_path(Dir), real_path(File)} of
         {{ok, RealDir}, {ok, RealFile}} ->
-            case string:prefix(RealFile, <<RealDir/binary, "/">>) of
-                nomatch -> outside;
-                _Rest -> RealFile
+            %% Compared as bytes: either name need not be UTF-8.
+            Size = byte_size(RealDir),
+            case RealFile of
+                <<RealDir:Size/binary, $/, _Rest/binary>> -> RealFile;
+                _Beyond -> outside
             end;
         _Unresolved ->
             outside
     end.
 
-%% Paths as binaries throughout (asset segments arrive as binaries).
+%% Paths as binaries throughout: an asset segment is the octets its escapes
+%% encode, so `%FF` is a raw (non-UTF-8) file name, looked up as such.
 real_path(Path) ->
-    resolve(filename:split(unicode:characters_to_binary(filename:absname(Path))), [], 0).
+    resolve(filename:split(name(filename:absname(Path))), [], 0).
 
 resolve(_Components, _Resolved, Links) when Links > 40 ->
     error;
@@ -342,15 +348,20 @@ resolve([Component | Rest], Resolved, Links) ->
     Path = filename:join(lists:reverse([Component | Resolved])),
     case file:read_link_info(Path) of
         {ok, #file_info{type = symlink}} ->
-            {ok, Target} = file:read_link(Path),
+            {ok, Target} = file:read_link_all(Path),
             Base = filename:join(lists:reverse(Resolved)),
-            Next = unicode:characters_to_binary(filename:absname(Target, Base)),
+            Next = name(filename:absname(Target, Base)),
             resolve(filename:split(Next) ++ Rest, [], Links + 1);
         {ok, _Info} ->
             resolve(Rest, [Component | Resolved], Links);
         {error, _Reason} ->
             error
     end.
+
+%% A name as a binary: a list (the asset dir, a link target the file name
+%% encoding can read) holds characters, a binary is the raw name already.
+name(Name) when is_binary(Name) -> Name;
+name(Name) -> unicode:characters_to_binary(Name).
 
 cache_control({asset, _Path, _Source, #{cache_control := Value}}) ->
     [{~"cache-control", Value}];

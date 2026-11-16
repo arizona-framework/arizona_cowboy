@@ -4,8 +4,11 @@ Cowboy adapter for the `arizona_req` behaviour.
 
 The raw value is Cowboy's request map. Path bindings are the ones
 `arizona_route_table` matched, stored on the request under Cowboy's own
-`bindings` key (binary names, percent-decoded values), since Cowboy's router
-only saw the adapter's catch-all route.
+`bindings` key (binary names, percent-decoded values), since no Cowboy router
+matches an Arizona route.
+
+The query string is parsed by `parse_qs/1` rather than Cowboy's
+`cowboy_req:parse_qs/1`, which refuses a malformed escape with `400`.
 """.
 
 -behaviour(arizona_req).
@@ -15,6 +18,7 @@ only saw the adapter's catch-all route.
 %% --------------------------------------------------------------------
 
 -export([new/1]).
+-export([parse_qs/1]).
 
 %% --------------------------------------------------------------------
 %% arizona_req callbacks
@@ -42,6 +46,19 @@ new(CowboyReq) ->
         path => cowboy_req:path(CowboyReq)
     }).
 
+-doc """
+Parses a raw query string as form encoding, into its `{Key, Value}` pairs in
+order, repeated keys kept: `+` is a space and each `%HH` escape the octet it
+encodes, UTF-8 or not, and a bare key (`?debug`) is `true`. Empty pairs are
+skipped. A key or value holding an escape that does not decode (`%G1`, a
+trailing `%4` or `%`) is kept as written, only its `+` turned to spaces, as
+browsers send such a URL as typed. Never fails.
+""".
+-spec parse_qs(Qs) -> [{binary(), binary() | true}] when
+    Qs :: binary().
+parse_qs(Qs) ->
+    [parse_pair(Pair) || Pair <- binary:split(Qs, ~"&", [global]), Pair =/= <<>>].
+
 %% --------------------------------------------------------------------
 %% arizona_req behaviour callbacks
 %% --------------------------------------------------------------------
@@ -52,7 +69,7 @@ parse_bindings(CowboyReq) ->
 
 -spec parse_params(cowboy_req:req()) -> arizona_req:params().
 parse_params(CowboyReq) ->
-    cowboy_req:parse_qs(CowboyReq).
+    parse_qs(cowboy_req:qs(CowboyReq)).
 
 -spec parse_cookies(cowboy_req:req()) -> arizona_req:cookies().
 parse_cookies(CowboyReq) ->
@@ -112,6 +129,36 @@ resolve_route(_Path, _Qs, _CowboyReq) ->
 %% --------------------------------------------------------------------
 %% Internal functions
 %% --------------------------------------------------------------------
+
+parse_pair(Pair) ->
+    case binary:split(Pair, ~"=") of
+        [Key] -> {decode(Key), true};
+        [Key, Value] -> {decode(Key), decode(Value)}
+    end.
+
+decode(Component) ->
+    Spaced = binary:replace(Component, ~"+", ~" ", [global]),
+    unescape(Spaced, Spaced, <<>>).
+
+%% `Spaced` whole when any escape in it does not decode.
+unescape(<<>>, _Spaced, Acc) ->
+    Acc;
+unescape(<<$%, High, Low, Rest/binary>>, Spaced, Acc) ->
+    case {hex(High), hex(Low)} of
+        {H, L} when is_integer(H), is_integer(L) ->
+            unescape(Rest, Spaced, <<Acc/binary, (H * 16 + L)>>);
+        _NotHex ->
+            Spaced
+    end;
+unescape(<<$%, _Truncated/binary>>, Spaced, _Acc) ->
+    Spaced;
+unescape(<<Byte, Rest/binary>>, Spaced, Acc) ->
+    unescape(Rest, Spaced, <<Acc/binary, Byte>>).
+
+hex(C) when C >= $0, C =< $9 -> C - $0;
+hex(C) when C >= $a, C =< $f -> C - $a + 10;
+hex(C) when C >= $A, C =< $F -> C - $A + 10;
+hex(_C) -> error.
 
 %% A body larger than `Max` is refused (`too_large`) rather than buffered.
 read_body(CowboyReq0, Acc, Size, Max) ->
