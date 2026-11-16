@@ -64,6 +64,9 @@ init_per_testcase(owner_routes_answer_while_mounting_and_unmounting, Config) ->
     Config;
 init_per_testcase(arizona_routes_answer_while_mounting_and_unmounting, Config) ->
     Config;
+init_per_testcase(a_request_reads_the_listener_once, Config) ->
+    ok = arizona_cowboy_server:mount(?OWNER, #{routes => [body_route() | routes()]}),
+    Config;
 init_per_testcase(a_navigate_on_an_unmounted_listener_is_unresolved, Config) ->
     ok = arizona_cowboy_server:mount(?OWNER, #{
         routes => [{live, ~"/live", arizona_cowboy_echo_page, #{}}]
@@ -147,19 +150,22 @@ owner_routes_answer_while_mounting_and_unmounting(Config) ->
 %% What the race cases catch only when a request is preempted at the wrong
 %% moment, pinned on every request: whatever it reaches, a request reads what
 %% the listener serves once, so no unmount can fall between two reads.
+%% The middleware hands what it read to the handler, which serves an Arizona
+%% route, its body read included, from that.
 a_request_reads_the_listener_once(Config) ->
-    ?assertEqual([{~"/owned", 200, 1}], reads(Config, [{~"GET", ~"/owned"}])).
+    ?assertEqual(
+        [{~"/owned", 200, 1}, {~"/hello", 200, 1}, {~"/body", 200, 1}],
+        reads(Config, [{~"GET", ~"/owned"}, {~"GET", ~"/hello"}, {~"POST", ~"/body"}])
+    ).
 
 %% A request the middleware hands to an Arizona route is served from the routes
 %% and limits it read, so an unmount landing mid-request is no crash: the
 %% request is served (`200`) or, read before the mount, the owner's (`404`). The
 %% body read takes the listener's `max_content_length` too.
 arizona_routes_answer_while_mounting_and_unmounting(Config) ->
-    Routes = [
-        {post, ~"/body", arizona_cowboy_body_controller, #{state => #{prefix => ~"read "}}}
-        | routes()
-    ],
-    Answers = while_flipping(Routes, Config, [{~"GET", ~"/hello"}, {~"POST", ~"/body"}]),
+    Answers = while_flipping([body_route() | routes()], Config, [
+        {~"GET", ~"/hello"}, {~"POST", ~"/body"}
+    ]),
     ?assertEqual([], [Answer || Answer <- Answers, not is_status(Answer, [200, 404])]).
 
 %% A live session can outlast its routes: a navigate after the unmount is left
@@ -288,6 +294,10 @@ upgrade_req(Listener) ->
         body_length => 0,
         bindings => #{}
     }.
+
+%% A controller reading its request's body.
+body_route() ->
+    {post, ~"/body", arizona_cowboy_body_controller, #{state => #{prefix => ~"read "}}}.
 
 routes() ->
     [{get, ~"/hello", arizona_cowboy_smoke_controller, #{state => #{body => ~"hi"}}}].
