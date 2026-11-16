@@ -192,8 +192,11 @@ asset_missing_non_utf8_file_is_404(Config) ->
     ].
 
 %% `%FF` is the octet 255, so it names the file whose name holds that byte.
+%% Its type comes from its extension alone, which is ASCII.
 asset_non_utf8_file_is_served(Config) ->
-    ?assertEqual({200, ~"octet-bytes"}, request(Config, ~"GET", ~"/files/f%FF.txt")).
+    {200, Head, Body} = request_head(Config, ~"GET", ~"/files/f%FF.txt"),
+    ?assertEqual(~"octet-bytes", Body),
+    ?assertNotEqual(nomatch, binary:match(Head, ~"content-type: text/plain")).
 
 asset_link_to_a_non_utf8_name_is_followed_inside_only(Config) ->
     ?assertEqual({200, ~"octet-bytes"}, request(Config, ~"GET", ~"/files/inner.txt")),
@@ -209,7 +212,9 @@ asset_dir_whose_name_is_not_utf8_serves(Config) ->
         routes => [{asset, ~"/files", {dir, Dir}, #{}}]
     }),
     try
-        ?assertEqual({200, ~"raw-dir-bytes"}, request([{port, Port}], ~"GET", ~"/files/app.txt"))
+        {200, Head, Body} = request_head([{port, Port}], ~"GET", ~"/files/app.txt"),
+        ?assertEqual(~"raw-dir-bytes", Body),
+        ?assertNotEqual(nomatch, binary:match(Head, ~"content-type: text/plain"))
     after
         ok = arizona_cowboy_server:stop(escapes_raw_dir)
     end.
