@@ -304,7 +304,7 @@ ws_upgrade_with_a_malformed_query_escape_opens(Config) ->
 %% `arizona_req:params/1` then parses: a malformed escape must not crash the
 %% live session.
 navigate_target_with_a_malformed_query_escape_resolves(Config) when is_list(Config) ->
-    Raw = upgrade_req(),
+    Raw = upgrade_req(?LISTENER),
     {ok, arizona_cowboy_echo_page, _RouteOpts, Req} =
         arizona_cowboy_req:resolve_route(~"/live", ~"locale=%G1&x=%4", Raw),
     ?assertMatch({?PARAMS, _}, arizona_req:params(Req)).
@@ -326,10 +326,12 @@ ws_upgrade_with_more_keys_than_the_limit_is_400(Config) ->
 %% A navigate cannot be answered `400`: the target is left unresolved, so the
 %% client loads it over HTTP, where it is.
 navigate_target_with_more_keys_than_the_limit_is_a_full_load(Config) when is_list(Config) ->
-    ?assertEqual(error, arizona_cowboy_req:resolve_route(~"/live", keys(101), upgrade_req())),
+    ?assertEqual(
+        error, arizona_cowboy_req:resolve_route(~"/live", keys(101), upgrade_req(?LISTENER))
+    ),
     ?assertMatch(
         {ok, arizona_cowboy_echo_page, _, _},
-        arizona_cowboy_req:resolve_route(~"/live", keys(100), upgrade_req())
+        arizona_cowboy_req:resolve_route(~"/live", keys(100), upgrade_req(?LISTENER))
     ).
 
 parse_qs_refuses_more_keys_than_asked(Config) when is_list(Config) ->
@@ -343,11 +345,21 @@ max_query_keys_sets_the_limit(Config) when is_list(Config) ->
     {ok, _} = arizona_cowboy_server:start(escapes_keys, #{
         transport_opts => [{port, Port}],
         max_query_keys => 2,
-        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}]
+        routes => [
+            {get, ~"/q", arizona_cowboy_echo_controller, #{}},
+            {live, ~"/plain", arizona_cowboy_echo_page, #{}},
+            {ws, ~"/ws", #{}}
+        ]
     }),
     try
         ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q?a=1&b")),
-        ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/q?a=1&b&c"))
+        ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/q?a=1&b&c")),
+        ?assertMatch(
+            <<"HTTP/1.1 400 ", _/binary>>, upgrade([{port, Port}], ~"/ws?_az_path=/plain&a&b&c")
+        ),
+        Raw = upgrade_req(escapes_keys),
+        ?assertMatch({ok, _, _, _}, arizona_cowboy_req:resolve_route(~"/plain", ~"a&b", Raw)),
+        ?assertEqual(error, arizona_cowboy_req:resolve_route(~"/plain", ~"a&b&c", Raw))
     after
         ok = arizona_cowboy_server:stop(escapes_keys)
     end.
@@ -356,10 +368,10 @@ max_query_keys_sets_the_limit(Config) when is_list(Config) ->
 %% Helpers
 %% --------------------------------------------------------------------
 
-%% A WebSocket upgrade's request, as Cowboy hands it over.
-upgrade_req() ->
+%% A WebSocket upgrade's request to `Listener`, as Cowboy hands it over.
+upgrade_req(Listener) ->
     #{
-        ref => ?LISTENER,
+        ref => Listener,
         pid => self(),
         streamid => 1,
         peer => {{127, 0, 0, 1}, 50000},
