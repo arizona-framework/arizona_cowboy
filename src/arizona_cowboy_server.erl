@@ -80,7 +80,6 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -export([mount/2]).
 -export([unmount/1]).
 -export([find_table/1]).
--export([answers_misses/1]).
 -export([drain/2]).
 -export([notify_drain/2]).
 -export([recompile_routes/0]).
@@ -238,26 +237,23 @@ ws_opts(Name) ->
     #{ws_opts := WsOpts} = persistent_term:get(?KEY(Name)),
     WsOpts.
 
--doc "The compiled route table of the listener `Ref`, if it serves Arizona routes.".
--spec find_table(Ref) -> {ok, arizona_route_table:table()} | error when
-    Ref :: atom().
+-doc """
+The compiled route table of the listener `Ref`, if it serves Arizona routes,
+and whether the listener answers a path no Arizona route matches itself
+(`AnswersMisses`): true for one `start/2` started with the adapter's default
+chain, whose router holds nothing else; false for a mounted listener, and for
+one whose `proto_opts` names its own `middlewares` or `env`, where other routes
+may lie behind. Both come from one read, so an unmount cannot fall between them.
+""".
+-spec find_table(Ref) -> {ok, Table, AnswersMisses} | error when
+    Ref :: atom(),
+    Table :: arizona_route_table:table(),
+    AnswersMisses :: boolean().
 find_table(Ref) ->
     case persistent_term:get(?KEY(Ref), undefined) of
-        #{table := Table} -> {ok, Table};
+        #{table := Table, answers_misses := AnswersMisses} -> {ok, Table, AnswersMisses};
         undefined -> error
     end.
-
--doc """
-Whether the listener `Ref` answers a path no Arizona route matches itself: true
-for one `start/2` started with its own middleware chain, whose router holds
-nothing else; false for a mounted listener, and for one whose `proto_opts`
-names its own `middlewares` or `env`, where other routes may lie behind.
-""".
--spec answers_misses(Ref) -> boolean() when
-    Ref :: atom().
-answers_misses(Ref) ->
-    #{answers_misses := Answers} = persistent_term:get(?KEY(Ref)),
-    Answers.
 
 -doc "The largest request body the listener `Name` lets a controller read.".
 -spec max_content_length(Name) -> non_neg_integer() when

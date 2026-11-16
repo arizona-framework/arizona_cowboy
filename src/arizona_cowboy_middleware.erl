@@ -46,9 +46,10 @@ ok = arizona_cowboy_server:mount(my_listener, #{routes => ArizonaRoutes}).
     Env :: cowboy_middleware:env().
 execute(#{ref := Ref, path := <<$/, _/binary>>} = Req, Env) ->
     case arizona_cowboy_server:find_table(Ref) of
-        {ok, Table} ->
+        {ok, Table, AnswersMisses} ->
             case arizona_route_table:match(cowboy_req:method(Req), cowboy_req:path(Req), Table) of
-                not_found -> miss(Req, Env, Ref);
+                not_found when AnswersMisses -> serve(Req, Env, Ref);
+                not_found -> {ok, Req, Env};
                 _ArizonaPath -> serve(Req, Env, Ref)
             end;
         error ->
@@ -60,15 +61,6 @@ execute(Req, Env) ->
 %% --------------------------------------------------------------------
 %% Internal functions
 %% --------------------------------------------------------------------
-
-%% A listener whose router holds only the catch-all to the handler has the
-%% handler answer `404` here, so Cowboy's router never refuses a path it cannot
-%% parse (`400`); anywhere else the owner's chain may serve it.
-miss(Req, Env, Ref) ->
-    case arizona_cowboy_server:answers_misses(Ref) of
-        true -> serve(Req, Env, Ref);
-        false -> {ok, Req, Env}
-    end.
 
 %% `cowboy_handler` runs the handler and the loop or WebSocket it upgrades to;
 %% the request is answered then, so the owner's chain must not run after it.

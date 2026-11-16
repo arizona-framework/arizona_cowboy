@@ -18,6 +18,7 @@ by `arizona_cowboy_middleware` in front of the owner's own router.
 -export([drain_and_stop_leave_the_owners_listener_up/1]).
 -export([options_star_passes_on_to_the_owner/1]).
 -export([query_key_limit_applies_to_mounted_routes_only/1]).
+-export([owner_routes_answer_while_mounting_and_unmounting/1]).
 
 -define(OWNER, mount_owner).
 
@@ -29,7 +30,8 @@ all() ->
         mounts_once,
         drain_and_stop_leave_the_owners_listener_up,
         options_star_passes_on_to_the_owner,
-        query_key_limit_applies_to_mounted_routes_only
+        query_key_limit_applies_to_mounted_routes_only,
+        owner_routes_answer_while_mounting_and_unmounting
     ].
 
 init_per_suite(Config) ->
@@ -48,6 +50,8 @@ end_per_suite(Config) when is_list(Config) ->
     ok = application:stop(arizona).
 
 init_per_testcase(an_unmounted_listener_passes_everything_on, Config) ->
+    Config;
+init_per_testcase(owner_routes_answer_while_mounting_and_unmounting, Config) ->
     Config;
 init_per_testcase(options_star_passes_on_to_the_owner, Config) ->
     ok = arizona_cowboy_server:mount(?OWNER, #{
@@ -116,6 +120,24 @@ query_key_limit_applies_to_mounted_routes_only(Config) ->
     ?assertMatch({200, <<"hi">>}, request(Config, ~"GET", ~"/hello?a&b")),
     ?assertMatch({400, _}, request(Config, ~"GET", ~"/hello?a&b&c")),
     ?assertMatch({200, <<"owner">>}, request(Config, ~"GET", ~"/owned?a&b&c")).
+
+%% The middleware decides a request from one read of the mounted routes: an
+%% unmount landing while it handles a request to one of the owner's own routes
+%% is no crash, the request is passed on either way. A race, so many tries.
+owner_routes_answer_while_mounting_and_unmounting(Config) ->
+    Flipper = spawn_link(fun Flip() ->
+        ok = arizona_cowboy_server:mount(?OWNER, #{routes => routes()}),
+        ok = arizona_cowboy_server:unmount(?OWNER),
+        Flip()
+    end),
+    Answers =
+        try
+            [request(Config, ~"GET", ~"/owned") || _ <- lists:seq(1, 4000)]
+        after
+            unlink(Flipper),
+            exit(Flipper, kill)
+        end,
+    ?assertEqual([], [Answer || {Status, _} = Answer <- Answers, Status =/= 200]).
 
 %% --------------------------------------------------------------------
 %% Helpers
