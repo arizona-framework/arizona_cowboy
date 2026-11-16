@@ -29,6 +29,11 @@ its own.
 -export([asset_traversal_is_refused_in_every_encoding/1]).
 -export([ws_upgrade_with_a_malformed_query_escape_opens/1]).
 -export([navigate_target_with_a_malformed_query_escape_resolves/1]).
+-export([query_with_more_keys_than_the_limit_is_400/1]).
+-export([ws_upgrade_with_more_keys_than_the_limit_is_400/1]).
+-export([navigate_target_with_more_keys_than_the_limit_is_a_full_load/1]).
+-export([parse_qs_refuses_more_keys_than_asked/1]).
+-export([max_query_keys_sets_the_limit/1]).
 
 -define(LISTENER, escapes).
 -define(PARAMS, [{~"locale", ~"%G1"}, {~"x", ~"%4"}]).
@@ -49,7 +54,12 @@ all() ->
         asset_dir_list_follows_a_latin1_file_name_encoding,
         asset_traversal_is_refused_in_every_encoding,
         ws_upgrade_with_a_malformed_query_escape_opens,
-        navigate_target_with_a_malformed_query_escape_resolves
+        navigate_target_with_a_malformed_query_escape_resolves,
+        query_with_more_keys_than_the_limit_is_400,
+        ws_upgrade_with_more_keys_than_the_limit_is_400,
+        navigate_target_with_more_keys_than_the_limit_is_a_full_load,
+        parse_qs_refuses_more_keys_than_asked,
+        max_query_keys_sets_the_limit
     ].
 
 init_per_suite(Config) ->
@@ -294,8 +304,61 @@ ws_upgrade_with_a_malformed_query_escape_opens(Config) ->
 %% `arizona_req:params/1` then parses: a malformed escape must not crash the
 %% live session.
 navigate_target_with_a_malformed_query_escape_resolves(Config) when is_list(Config) ->
-    %% The upgrade's request, as Cowboy hands it over.
-    Raw = #{
+    Raw = upgrade_req(),
+    {ok, arizona_cowboy_echo_page, _RouteOpts, Req} =
+        arizona_cowboy_req:resolve_route(~"/live", ~"locale=%G1&x=%4", Raw),
+    ?assertMatch({?PARAMS, _}, arizona_req:params(Req)).
+
+%% Cowboy's own query parser stops at 100 keys and Cowboy answers `400`; the
+%% adapter keeps that limit. Empty pairs are no keys.
+query_with_more_keys_than_the_limit_is_400(Config) ->
+    {200, #{params := Params}} = echo(Config, <<"/q?", (keys(100))/binary, "&&&">>),
+    ?assertEqual(100, length(Params)),
+    ?assertMatch({400, _}, request(Config, ~"GET", <<"/q?", (keys(101))/binary>>)).
+
+%% `_az_path` is one of the keys.
+ws_upgrade_with_more_keys_than_the_limit_is_400(Config) ->
+    ?assertMatch(
+        <<"HTTP/1.1 400 ", _/binary>>,
+        upgrade(Config, <<"/ws?_az_path=/live&", (keys(100))/binary>>)
+    ).
+
+%% A navigate cannot be answered `400`: the target is left unresolved, so the
+%% client loads it over HTTP, where it is.
+navigate_target_with_more_keys_than_the_limit_is_a_full_load(Config) when is_list(Config) ->
+    ?assertEqual(error, arizona_cowboy_req:resolve_route(~"/live", keys(101), upgrade_req())),
+    ?assertMatch(
+        {ok, arizona_cowboy_echo_page, _, _},
+        arizona_cowboy_req:resolve_route(~"/live", keys(100), upgrade_req())
+    ).
+
+parse_qs_refuses_more_keys_than_asked(Config) when is_list(Config) ->
+    ?assertEqual([{~"a", true}, {~"b", true}], arizona_cowboy_req:parse_qs(~"a&&b&", 2)),
+    ?assertExit({request_error, limit_reached, _}, arizona_cowboy_req:parse_qs(~"a&b&c", 2)),
+    ?assertEqual(100, length(arizona_cowboy_req:parse_qs(keys(100)))),
+    ?assertExit({request_error, limit_reached, _}, arizona_cowboy_req:parse_qs(keys(101))).
+
+max_query_keys_sets_the_limit(Config) when is_list(Config) ->
+    Port = pick_port(),
+    {ok, _} = arizona_cowboy_server:start(escapes_keys, #{
+        transport_opts => [{port, Port}],
+        max_query_keys => 2,
+        routes => [{get, ~"/q", arizona_cowboy_echo_controller, #{}}]
+    }),
+    try
+        ?assertMatch({200, _}, request([{port, Port}], ~"GET", ~"/q?a=1&b")),
+        ?assertMatch({400, _}, request([{port, Port}], ~"GET", ~"/q?a=1&b&c"))
+    after
+        ok = arizona_cowboy_server:stop(escapes_keys)
+    end.
+
+%% --------------------------------------------------------------------
+%% Helpers
+%% --------------------------------------------------------------------
+
+%% A WebSocket upgrade's request, as Cowboy hands it over.
+upgrade_req() ->
+    #{
         ref => ?LISTENER,
         pid => self(),
         streamid => 1,
@@ -313,14 +376,13 @@ navigate_target_with_a_malformed_query_escape_resolves(Config) when is_list(Conf
         has_body => false,
         body_length => 0,
         bindings => #{}
-    },
-    {ok, arizona_cowboy_echo_page, _RouteOpts, Req} =
-        arizona_cowboy_req:resolve_route(~"/live", ~"locale=%G1&x=%4", Raw),
-    ?assertMatch({?PARAMS, _}, arizona_req:params(Req)).
+    }.
 
-%% --------------------------------------------------------------------
-%% Helpers
-%% --------------------------------------------------------------------
+%% `N` distinct `kI=v` pairs.
+keys(N) ->
+    iolist_to_binary(
+        lists:join(~"&", [[~"k", integer_to_binary(I), ~"=v"] || I <- lists:seq(1, N)])
+    ).
 
 pick_port() ->
     {ok, Listen} = gen_tcp:listen(0, [{reuseaddr, true}]),

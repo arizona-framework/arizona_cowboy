@@ -168,7 +168,9 @@ serve(#{kind := Kind, target := #{handler := Handler} = Controller} = Entry, Req
     ),
     controller_reply(Entry, Handler, Reply, arizona_req:raw(ArzReq), Listener);
 serve(#{kind := ws}, Req, Listener) ->
-    QS = arizona_cowboy_req:parse_qs(cowboy_req:qs(Req)),
+    QS = arizona_cowboy_req:parse_qs(
+        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener)
+    ),
     case arizona_ws:upgrade(QS, arizona_cowboy_req, Req) of
         {reply, Status, Headers, Raw} ->
             {ok, reply({Status, Headers, <<>>}, Raw), Listener};

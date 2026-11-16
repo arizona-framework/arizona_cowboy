@@ -19,9 +19,9 @@ parse).
 started (a Nova or plain Cowboy application): it compiles the routes under that
 listener's ref without starting anything, and `arizona_cowboy_middleware`, placed
 in the listener's middleware chain, serves the requests they match and passes the
-rest on. It takes `routes`, `compress`, `error_page`, `ws_opts` and
-`max_content_length` as below; the owner configures the listener itself, TLS
-and `enable_connect_protocol` included. `unmount/1` forgets the routes,
+rest on. It takes `routes`, `compress`, `error_page`, `ws_opts`,
+`max_content_length` and `max_query_keys` as below; the owner configures the
+listener itself, TLS and `enable_connect_protocol` included. `unmount/1` forgets the routes,
 `notify_drain/2` tells the live sessions to wind down, and `drain/2` also waits
 for the requests in flight, then unmounts, leaving the owner's listener running.
 
@@ -39,6 +39,10 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   certs' traffic in cleartext.
 - `max_content_length` -- the largest request body a controller can read, in
   bytes (default `10485760`); a larger one reads as `{error, too_large}`.
+- `max_query_keys` -- the most keys a query string may hold (default `100`,
+  Cowboy's own limit). One with more is answered `400` over HTTP and on a
+  WebSocket upgrade, as Cowboy's parser has it answered, and a live navigate to
+  it becomes a full page load, which gets that `400`. Roadrunner has no such cap.
 - `compress` -- `true` (default) compresses pages and assets
   (`arizona_route:transforms/2`).
 - `error_page` -- `{Module, Function}` template rendered on a page crash in
@@ -72,6 +76,7 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -export([table/1]).
 -export([ws_opts/1]).
 -export([max_content_length/1]).
+-export([max_query_keys/1]).
 -export([format_error/2]).
 
 %% --------------------------------------------------------------------
@@ -90,6 +95,7 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -define(KEY(Name), {?MODULE, Name}).
 -define(WS_OPTS, #{idle_timeout => infinity, max_frame_size => 10485760}).
 -define(MAX_CONTENT_LENGTH, 10485760).
+-define(MAX_QUERY_KEYS, 100).
 
 %% --------------------------------------------------------------------
 %% API Functions
@@ -234,6 +240,13 @@ max_content_length(Name) ->
     #{max_content_length := Max} = persistent_term:get(?KEY(Name)),
     Max.
 
+-doc "The most keys a query string may hold on the listener `Name`.".
+-spec max_query_keys(Name) -> non_neg_integer() when
+    Name :: atom().
+max_query_keys(Name) ->
+    #{max_query_keys := Max} = persistent_term:get(?KEY(Name)),
+    Max.
+
 -doc "Renders this module's configuration errors.".
 -spec format_error(Reason, Stacktrace) -> ErrorInfo when
     Reason :: term(),
@@ -311,7 +324,8 @@ stash(Routes, Opts) ->
         build_opts => BuildOpts,
         table => arizona_route_table:compile(Routes, BuildOpts, ?MODULE),
         ws_opts => maps:merge(?WS_OPTS, maps:get(ws_opts, Opts, #{})),
-        max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH)
+        max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH),
+        max_query_keys => maps:get(max_query_keys, Opts, ?MAX_QUERY_KEYS)
     }.
 
 suspend_owned(#{owner := self}, Name) ->
