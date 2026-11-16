@@ -1,7 +1,9 @@
 -module(arizona_cowboy_handler).
 -moduledoc """
-The Cowboy adapter's single handler: every request reaches it through the
-listener's catch-all route, and it routes with `arizona_route_table`.
+The Cowboy adapter's single handler: a request reaches it through
+`arizona_cowboy_middleware` (a path an Arizona route matches) or, on a listener
+this adapter started, the router's catch-all route (any other path, answered
+`404`), and it routes with `arizona_route_table`.
 
 What each route kind answers comes from core -- `arizona_http:reply/3` for a
 page, `arizona_ws:upgrade/3` for a WebSocket, `arizona_controller:dispatch/3`
@@ -61,13 +63,19 @@ init(Req, Listener) ->
             {ok, reply({405, [{~"allow", join(Allow)}], <<>>}, Req), Listener};
         {ok, #{transforms := Transforms} = Entry, Bindings} ->
             Req1 = Req#{bindings => Bindings},
-            case
-                arizona_http_transforms:preflight(
-                    Transforms, cowboy_req:method(Req1), cowboy_req:headers(Req1)
-                )
-            of
-                none -> serve(Entry, Req1, Listener);
-                Preflight -> {ok, reply(Preflight, Req1), Listener}
+            case within_key_limit(Entry, Req1, Listener) of
+                false ->
+                    %% What Cowboy's own query parser has answered.
+                    {ok, reply({400, [], <<>>}, Req1), Listener};
+                true ->
+                    case
+                        arizona_http_transforms:preflight(
+                            Transforms, cowboy_req:method(Req1), cowboy_req:headers(Req1)
+                        )
+                    of
+                        none -> serve(Entry, Req1, Listener);
+                        Preflight -> {ok, reply(Preflight, Req1), Listener}
+                    end
             end
     end.
 
@@ -146,6 +154,27 @@ websocket_info(Msg, #{socket := Sock} = State) ->
 %% Internal functions
 %% --------------------------------------------------------------------
 
+%% Counted once, eagerly, before anything parses the query: a route that never
+%% reads it refuses one over the listener's `max_query_keys` as one that does,
+%% and a navigate (`arizona_cowboy_req:resolve_route/3`) applies the same rule.
+%% An asset never reads its query. An upgrade's query is the page's, the extra
+%% params the page's `connect(endpoint, params)` call passes, and the keys
+%% Arizona's client adds, which `arizona_ws` strips before the page sees it.
+%% Only those last count for none (each once): the server cannot tell connect
+%% params from page keys, so they count, and a page served within the limit is
+%% refused its socket when its connect params push it over.
+within_key_limit(#{kind := asset}, _Req, _Listener) ->
+    true;
+within_key_limit(#{kind := Kind}, Req, Listener) ->
+    Uncounted =
+        case Kind of
+            ws -> [~"_az_path", ~"_az_reconnect", ~"_az_fps_follow", ~"_az_caps"];
+            _Other -> []
+        end,
+    arizona_cowboy_req:within_key_limit(
+        cowboy_req:qs(Req), arizona_cowboy_server:max_query_keys(Listener), Uncounted
+    ).
+
 %% A plain OPTIONS reaches a route only when it was opened for a CORS
 %% preflight; it answers with the URL's Allow set, never the route.
 serve(#{cors_options := true} = Entry, #{method := ~"OPTIONS"} = Req, Listener) ->
@@ -166,7 +195,9 @@ serve(#{kind := Kind, target := #{handler := Handler} = Controller} = Entry, Req
     ),
     controller_reply(Entry, Handler, Reply, arizona_req:raw(ArzReq), Listener);
 serve(#{kind := ws}, Req, Listener) ->
-    case arizona_ws:upgrade(cowboy_req:parse_qs(Req), arizona_cowboy_req, Req) of
+    case
+        arizona_ws:upgrade(arizona_cowboy_req:parse_qs(cowboy_req:qs(Req)), arizona_cowboy_req, Req)
+    of
         {reply, Status, Headers, Raw} ->
             {ok, reply({Status, Headers, <<>>}, Raw), Listener};
         {upgrade, Headers, WsState} ->
@@ -187,9 +218,8 @@ serve_file(Entry, _Route, outside, Req, Listener) ->
 serve_file(Entry, Route, File, Req, Listener) ->
     case filelib:is_regular(File) of
         true ->
-            {Type, SubType, _Params} = cow_mimetypes:all(iolist_to_binary(File)),
             Headers =
-                [{~"content-type", <<Type/binary, "/", SubType/binary>>}] ++
+                [{~"content-type", content_type(File)}] ++
                     cache_control(Route),
             {Status, Headers1, stream} = wrap(Entry, Req, {200, Headers, stream}),
             Size = filelib:file_size(File),
@@ -197,6 +227,22 @@ serve_file(Entry, Route, File, Req, Listener) ->
         false ->
             finish(Entry, Req, {404, [], <<>>}, Listener)
     end.
+
+%% From the extension, by `cow_mimetypes`, which folds its case with
+%% `string:lowercase/1` and so raises on bytes that are not UTF-8. No type has
+%% an extension past ASCII, so such a one names none and is never looked up.
+content_type(File) ->
+    case is_ascii(filename:extension(File)) of
+        true ->
+            {Type, SubType, _Params} = cow_mimetypes:all(File),
+            <<Type/binary, "/", SubType/binary>>;
+        false ->
+            ~"application/octet-stream"
+    end.
+
+is_ascii(<<C, Rest/binary>>) when C < 128 -> is_ascii(Rest);
+is_ascii(<<>>) -> true;
+is_ascii(_NotAscii) -> false.
 
 controller_reply(Entry, _Handler, {Status, Headers, Body}, Req, Listener) when
     is_integer(Status)
@@ -316,17 +362,20 @@ asset_file(Dir, Segments) ->
 inside(Dir, File) ->
     case {real_path(Dir), real_path(File)} of
         {{ok, RealDir}, {ok, RealFile}} ->
-            case string:prefix(RealFile, <<RealDir/binary, "/">>) of
-                nomatch -> outside;
-                _Rest -> RealFile
+            %% Compared as bytes: either name need not be UTF-8.
+            Size = byte_size(RealDir),
+            case RealFile of
+                <<RealDir:Size/binary, $/, _Rest/binary>> -> RealFile;
+                _Beyond -> outside
             end;
         _Unresolved ->
             outside
     end.
 
-%% Paths as binaries throughout (asset segments arrive as binaries).
+%% Paths as binaries throughout: an asset segment is the octets its escapes
+%% encode, so `%FF` is a raw (non-UTF-8) file name, looked up as such.
 real_path(Path) ->
-    resolve(filename:split(unicode:characters_to_binary(filename:absname(Path))), [], 0).
+    resolve(filename:split(name(filename:absname(Path))), [], 0).
 
 resolve(_Components, _Resolved, Links) when Links > 40 ->
     error;
@@ -342,15 +391,22 @@ resolve([Component | Rest], Resolved, Links) ->
     Path = filename:join(lists:reverse([Component | Resolved])),
     case file:read_link_info(Path) of
         {ok, #file_info{type = symlink}} ->
-            {ok, Target} = file:read_link(Path),
+            {ok, Target} = file:read_link_all(Path),
             Base = filename:join(lists:reverse(Resolved)),
-            Next = unicode:characters_to_binary(filename:absname(Target, Base)),
+            Next = name(filename:absname(Target, Base)),
             resolve(filename:split(Next) ++ Rest, [], Links + 1);
         {ok, _Info} ->
             resolve(Rest, [Component | Resolved], Links);
         {error, _Reason} ->
             error
     end.
+
+%% A name as the raw bytes the file system holds. A binary is that already. A
+%% list (the asset dir, a link target the encoding can read) holds characters
+%% the node's file name encoding maps to bytes: one per character under latin1
+%% (`+fnl`), UTF-8 otherwise.
+name(Name) when is_binary(Name) -> Name;
+name(Name) -> unicode:characters_to_binary(Name, unicode, file:native_name_encoding()).
 
 cache_control({asset, _Path, _Source, #{cache_control := Value}}) ->
     [{~"cache-control", Value}];

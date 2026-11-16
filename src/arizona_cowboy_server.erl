@@ -3,10 +3,15 @@
 The Cowboy `arizona_server` adapter: boots a Cowboy listener serving Arizona
 routes.
 
-Cowboy's router sees one catch-all route to `arizona_cowboy_handler`; the
-Arizona routes are compiled by `arizona_route_table` into a table kept per
+The Arizona routes are compiled by `arizona_route_table` into a table kept per
 listener in a `persistent_term`, which the handler and
-`arizona_cowboy_req:resolve_route/3` read.
+`arizona_cowboy_req:resolve_route/3` read. The listener's middleware chain is
+`arizona_cowboy_middleware`, then Cowboy's router with one catch-all route to
+`arizona_cowboy_handler`, then `cowboy_handler`: Arizona's matcher sees every
+path first, as on a mounted listener, so a path Cowboy's router would refuse
+(a malformed escape) is still matched; the rest reach the router as before,
+which answers what Arizona does not serve (`404`, or `400` for a path it cannot
+parse).
 
 ## Mounting on a listener another framework owns
 
@@ -14,9 +19,9 @@ listener in a `persistent_term`, which the handler and
 started (a Nova or plain Cowboy application): it compiles the routes under that
 listener's ref without starting anything, and `arizona_cowboy_middleware`, placed
 in the listener's middleware chain, serves the requests they match and passes the
-rest on. It takes `routes`, `compress`, `error_page`, `ws_opts` and
-`max_content_length` as below; the owner configures the listener itself, TLS
-and `enable_connect_protocol` included. `unmount/1` forgets the routes,
+rest on. It takes `routes`, `compress`, `error_page`, `ws_opts`,
+`max_content_length` and `max_query_keys` as below; the owner configures the
+listener itself, TLS and `enable_connect_protocol` included. `unmount/1` forgets the routes,
 `notify_drain/2` tells the live sessions to wind down, and `drain/2` also waits
 for the requests in flight, then unmounts, leaving the owner's listener running.
 
@@ -34,6 +39,19 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   certs' traffic in cleartext.
 - `max_content_length` -- the largest request body a controller can read, in
   bytes (default `10485760`); a larger one reads as `{error, too_large}`.
+- `max_query_keys` -- the most keys a query string may hold: a non-negative
+  integer (default `100`, Cowboy's own limit) or `infinity` for no limit; any
+  other value is refused when the listener starts or mounts
+  (`bad_max_query_keys`). Empty pairs are no keys, and on a WebSocket upgrade
+  neither are the ones Arizona's client adds (`_az_path`, `_az_reconnect`,
+  `_az_fps_follow`, `_az_caps`, each once); the params a page's
+  `connect(endpoint, params)` call passes are query keys there and count, so a
+  page served within the limit is refused its socket when they push it over. A
+  request to a live or controller route, or an upgrade, with more is answered
+  `400`, whether or not the route reads its query; an asset route never counts.
+  A live navigate or patch to such a URL is not served in place
+  (`arizona_cowboy_req:resolve_route/3` answers `error`), so the client loads it
+  over HTTP and gets the same `400`. Roadrunner has no such cap.
 - `compress` -- `true` (default) compresses pages and assets
   (`arizona_route:transforms/2`).
 - `error_page` -- `{Module, Function}` template rendered on a page crash in
@@ -41,6 +59,9 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
   `{arizona_error_page, render}` for Arizona's HTML dev page.
 - `proto_opts` -- merged into Cowboy's protocol options. `enable_connect_protocol`
   is `true` by default, so a client may open a WebSocket over HTTP/2 (RFC 8441).
+  A `middlewares` or `env` given here replaces the adapter's own, so keep
+  `arizona_cowboy_middleware` in front of a router dispatching to
+  `arizona_cowboy_handler` (with the listener name as its options).
 - `ws_opts` -- merged into the `cowboy_websocket` options of every live session
   (default `#{idle_timeout => infinity, max_frame_size => 10485760}`: the frame
   cap bounds what one client can make a session buffer).
@@ -64,6 +85,7 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -export([table/1]).
 -export([ws_opts/1]).
 -export([max_content_length/1]).
+-export([max_query_keys/1]).
 -export([format_error/2]).
 
 %% --------------------------------------------------------------------
@@ -82,6 +104,7 @@ for the requests in flight, then unmounts, leaving the owner's listener running.
 -define(KEY(Name), {?MODULE, Name}).
 -define(WS_OPTS, #{idle_timeout => infinity, max_frame_size => 10485760}).
 -define(MAX_CONTENT_LENGTH, 10485760).
+-define(MAX_QUERY_KEYS, 100).
 
 %% --------------------------------------------------------------------
 %% API Functions
@@ -226,6 +249,13 @@ max_content_length(Name) ->
     #{max_content_length := Max} = persistent_term:get(?KEY(Name)),
     Max.
 
+-doc "The most keys a query string may hold on the listener `Name`.".
+-spec max_query_keys(Name) -> non_neg_integer() | infinity when
+    Name :: atom().
+max_query_keys(Name) ->
+    #{max_query_keys := Max} = persistent_term:get(?KEY(Name)),
+    Max.
+
 -doc "Renders this module's configuration errors.".
 -spec format_error(Reason, Stacktrace) -> ErrorInfo when
     Reason :: term(),
@@ -238,6 +268,12 @@ format_error(tls_with_http_scheme, _ST) ->
         general =>
             "tls => [...] implies https; drop scheme => http (or drop tls) "
             "instead of serving the configured certs' traffic in cleartext"
+    };
+format_error({bad_max_query_keys, Max}, _ST) ->
+    #{
+        general => io_lib:format(
+            "max_query_keys must be a non-negative integer or infinity, not ~0tp", [Max]
+        )
     };
 format_error({bad_scheme, Scheme}, _ST) ->
     #{general => io_lib:format("scheme must be http or https, not ~0tp", [Scheme])}.
@@ -268,7 +304,11 @@ start_new(Name, #{routes := Routes} = Opts) ->
     persistent_term:put(?KEY(Name), Stash#{owner => self}),
     Dispatch = cowboy_router:compile([{'_', [{"/[...]", arizona_cowboy_handler, Name}]}]),
     ProtoOpts = maps:merge(
-        #{env => #{dispatch => Dispatch}, enable_connect_protocol => true},
+        #{
+            middlewares => [arizona_cowboy_middleware, cowboy_router, cowboy_handler],
+            env => #{dispatch => Dispatch},
+            enable_connect_protocol => true
+        },
         maps:get(proto_opts, Opts, #{})
     ),
     case start_listener(Name, Tls, transport_opts(Opts), ProtoOpts) of
@@ -299,8 +339,16 @@ stash(Routes, Opts) ->
         build_opts => BuildOpts,
         table => arizona_route_table:compile(Routes, BuildOpts, ?MODULE),
         ws_opts => maps:merge(?WS_OPTS, maps:get(ws_opts, Opts, #{})),
-        max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH)
+        max_content_length => maps:get(max_content_length, Opts, ?MAX_CONTENT_LENGTH),
+        max_query_keys => query_key_limit(Opts)
     }.
+
+query_key_limit(#{max_query_keys := Max}) when Max =:= infinity; is_integer(Max), Max >= 0 ->
+    Max;
+query_key_limit(#{max_query_keys := Bad} = Opts) ->
+    config_error({bad_max_query_keys, Bad}, Opts);
+query_key_limit(#{}) ->
+    ?MAX_QUERY_KEYS.
 
 suspend_owned(#{owner := self}, Name) ->
     ranch:suspend_listener(Name);
